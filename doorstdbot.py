@@ -1594,14 +1594,14 @@ async def a_del_unit(cb: CallbackQuery):
     await cb.message.edit_text("Выберите юнита для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("delunit_"))
-async def a_del_unit_act(cb: CallbackQuery):
+async def a_del_unit_act(cb: CallbackQuery, state: FSMContext):
     uid = cb.data.split("_")[1]
     if uid in units_db:
         name = units_db[uid].get('name')
         del units_db[uid]
         save_data()
         await cb.answer(f"Удален: {name}", show_alert=True)
-    await cq_admin_panel(cb, None)
+    await cq_admin_panel(cb, state)
 
 # --- ДОБАВЛЕНИЕ МОБА ---
 @dp.callback_query(StateFilter('*'), F.data == "admin_add_mob")
@@ -1686,14 +1686,14 @@ async def a_del_mob(cb: CallbackQuery):
     await cb.message.edit_text("Выберите моба для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("delmob_"))
-async def a_del_mob_act(cb: CallbackQuery):
+async def a_del_mob_act(cb: CallbackQuery, state: FSMContext):
     mid = cb.data.split("_")[1]
     if mid in mobs_db:
         name = mobs_db[mid].get('name')
         del mobs_db[mid]
         save_data()
         await cb.answer(f"Удален: {name}", show_alert=True)
-    await cq_admin_panel(cb, None)
+    await cq_admin_panel(cb, state)
 
 # --- ДОБАВЛЕНИЕ КАРТЫ И ВОЛН ---
 @dp.callback_query(StateFilter('*'), F.data == "admin_add_map")
@@ -1830,14 +1830,14 @@ async def a_del_map(cb: CallbackQuery):
     await cb.message.edit_text("Выберите карту для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("delmap_"))
-async def a_del_map_act(cb: CallbackQuery):
+async def a_del_map_act(cb: CallbackQuery, state: FSMContext):
     mid = cb.data.split("_")[1]
     if mid in maps_db:
         name = maps_db[mid].get('name')
         del maps_db[mid]
         save_data()
         await cb.answer(f"Удалена: {name}", show_alert=True)
-    await cq_admin_panel(cb, None)
+    await cq_admin_panel(cb, state)
 
 # --- ДОБАВЛЕНИЕ КРЕЙТА ---
 @dp.callback_query(StateFilter('*'), F.data == "admin_add_crate")
@@ -1936,14 +1936,14 @@ async def a_del_crate(cb: CallbackQuery):
     await cb.message.edit_text("Выберите крейт для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("delcrate_"))
-async def a_del_crate_act(cb: CallbackQuery):
+async def a_del_crate_act(cb: CallbackQuery, state: FSMContext):
     cid = cb.data.split("_")[1]
     if cid in crates_db:
         name = crates_db[cid].get('name')
         del crates_db[cid]
         save_data()
         await cb.answer(f"Удален: {name}", show_alert=True)
-    await cq_admin_panel(cb, None)
+    await cq_admin_panel(cb, state)
 
 # --- ИЗМЕНЕНИЕ СТАТОВ ОБЪЕКТОВ И ДОБАВЛЕНИЕ УЛУЧШЕНИЙ ---
 @dp.callback_query(StateFilter('*'), F.data == "admin_edit_unit_list")
@@ -2335,13 +2335,41 @@ async def a_del_cur(cb: CallbackQuery):
     await cb.message.edit_text("Выберите валюту для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("delcur_"))
-async def a_del_cur_act(cb: CallbackQuery):
+async def a_del_cur_act(cb: CallbackQuery, state: FSMContext):
     idx = int(cb.data.split("_")[1])
     if 0 <= idx < len(currencies_db):
         c = currencies_db.pop(idx)
         save_data()
         await cb.answer(f"Удалено: {c}", show_alert=True)
-    await cq_admin_panel(cb, None)
+    await cq_admin_panel(cb, state)
+
+# --- ДОБАВЛЕНИЕ И УДАЛЕНИЕ РЕДКОСТИ ---
+@dp.callback_query(StateFilter('*'), F.data == "admin_add_rarity")
+async def a_add_rarity(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminRarityAdd.waiting_for_name)
+    await cb.message.edit_text("✨ Введите название новой редкости (например 'Легендарный'):")
+
+@dp.message(AdminRarityAdd.waiting_for_name)
+async def a_add_rarity_name(m: Message, state: FSMContext):
+    rarities_db.append(m.text.strip())
+    save_data()
+    await state.clear()
+    await send_main_screen(m, f"✅ Редкость «{m.text}» добавлена!")
+
+@dp.callback_query(StateFilter('*'), F.data == "admin_del_rarity")
+async def a_del_rarity(cb: CallbackQuery):
+    kb = [[InlineKeyboardButton(text=f"❌ {r}", callback_data=f"delrarity_{idx}")] for idx, r in enumerate(rarities_db)]
+    kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_panel")])
+    await cb.message.edit_text("Выберите редкость для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("delrarity_"))
+async def a_del_rarity_act(cb: CallbackQuery, state: FSMContext):
+    idx = int(cb.data.split("_")[1])
+    if 0 <= idx < len(rarities_db):
+        r = rarities_db.pop(idx)
+        save_data()
+        await cb.answer(f"Удалена: {r}", show_alert=True)
+    await cq_admin_panel(cb, state)
 
 @dp.callback_query(StateFilter('*'), F.data == "admin_add")
 async def a_add_adm(cb: CallbackQuery, state: FSMContext):
@@ -2365,13 +2393,13 @@ async def a_rem_adm(cb: CallbackQuery):
     await cb.message.edit_text("🚫 Выберите админа для снятия (Главного снять нельзя):", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("deladm_"))
-async def a_rem_adm_act(cb: CallbackQuery):
+async def a_rem_adm_act(cb: CallbackQuery, state: FSMContext):
     uid = cb.data.split("_")[1]
     if uid in admins_db and uid != MAIN_ADMIN_ID:
         admins_db.remove(uid)
         save_data()
         await cb.answer(f"Админ снят: {uid}", show_alert=True)
-    await cq_admin_panel(cb, None)
+    await cq_admin_panel(cb, state)
 
 def get_settings_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
