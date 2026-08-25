@@ -1499,7 +1499,12 @@ async def jump_next_unit_stat(m: Message, state: FSMContext):
     unit_id_counter += 1
     save_data()
     await state.clear()
-    await send_main_screen(m, f"✅ Юнит «{data['name']}» создан!")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬆️ Настроить Улучшения в бою", callback_data=f"edu_upg_{uid}")],
+        [InlineKeyboardButton(text="🔙 В главное меню", callback_data="admin_panel")]
+    ])
+    await m.answer(f"✅ Юнит «{data['name']}» успешно создан!\nВы можете сразу настроить уровни его прокачки в бою:", reply_markup=kb)
 
 @dp.message(AdminUnitAdd.cd)
 async def u_rec_cd(m: Message, state: FSMContext):
@@ -1944,11 +1949,11 @@ async def a_del_crate_act(cb: CallbackQuery):
 @dp.callback_query(StateFilter('*'), F.data == "admin_edit_unit_list")
 async def edit_unit_list(cb: CallbackQuery):
     if not units_db: return await cb.answer("Нет юнитов!", show_alert=True)
-    kb = [[InlineKeyboardButton(text=u.get('name'), callback_data=f"ed_u_{uid}")] for uid, u in units_db.items()]
+    kb = [[InlineKeyboardButton(text=u.get('name'), callback_data=f"edu_main_{uid}")] for uid, u in units_db.items()]
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
     await cb.message.edit_text("Выберите юнита для изменения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.callback_query(StateFilter('*'), F.data.startswith("ed_u_"))
+@dp.callback_query(StateFilter('*'), F.data.startswith("edu_main_"))
 async def edit_unit_menu(cb: CallbackQuery):
     uid = cb.data.split("_")[2]
     u = units_db.get(uid)
@@ -1973,14 +1978,14 @@ async def edit_unit_menu(cb: CallbackQuery):
     if "Горение" in u.get("unit_types", []):
         kb.append([InlineKeyboardButton(text=f"Урон Огня ({u.get('burn_damage')})", callback_data=f"set_u_{uid}_burn_damage")])
         
-    kb.append([InlineKeyboardButton(text="⬆️ Настроить Улучшения в бою", callback_data=f"ed_u_upg_{uid}")])
+    kb.append([InlineKeyboardButton(text="⬆️ Настроить Улучшения в бою", callback_data=f"edu_upg_{uid}")])
     kb.append([InlineKeyboardButton(text="🔙 К списку", callback_data="admin_edit_unit_list")])
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 # --- РУЧНЫЕ УЛУЧШЕНИЯ ЮНИТОВ ---
-@dp.callback_query(StateFilter('*'), F.data.startswith("ed_u_upg_"))
+@dp.callback_query(StateFilter('*'), F.data.startswith("edu_upg_"))
 async def unit_upgrade_menu(cb: CallbackQuery, state: FSMContext):
-    uid = cb.data.split("_")[3]
+    uid = cb.data.split("_")[2]
     u = units_db.get(uid)
     if not u: return await cb.answer("Юнит не найден", show_alert=True)
     
@@ -1992,14 +1997,14 @@ async def unit_upgrade_menu(cb: CallbackQuery, state: FSMContext):
             text += f" ├ Ур.{lvl} | 💰 {data.get('cost', 0)}\n"
             
     kb = [
-        [InlineKeyboardButton(text="➕ Добавить / Заменить уровень", callback_data=f"u_upg_add_{uid}")],
-        [InlineKeyboardButton(text="🔙 К юниту", callback_data=f"ed_u_{uid}")]
+        [InlineKeyboardButton(text="➕ Добавить / Заменить уровень", callback_data=f"edu_upgadd_{uid}")],
+        [InlineKeyboardButton(text="🔙 К юниту", callback_data=f"edu_main_{uid}")]
     ]
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.callback_query(StateFilter('*'), F.data.startswith("u_upg_add_"))
+@dp.callback_query(StateFilter('*'), F.data.startswith("edu_upgadd_"))
 async def u_upg_add(cb: CallbackQuery, state: FSMContext):
-    uid = cb.data.split("_")[3]
+    uid = cb.data.split("_")[2]
     await state.set_state(AdminUnitUpg.level)
     await state.update_data(uid=uid)
     await cb.message.edit_text("🔢 Введите номер уровня, который вы хотите настроить (например, 2 или 3):")
@@ -2086,7 +2091,7 @@ async def u_upg_targ(cb: CallbackQuery, state: FSMContext):
     save_data()
     await state.clear()
     
-    kb = [[InlineKeyboardButton(text="🔙 К настройке улучшений", callback_data=f"ed_u_upg_{uid}")]]
+    kb = [[InlineKeyboardButton(text="🔙 К настройке улучшений", callback_data=f"edu_upg_{uid}")]]
     await cb.message.edit_text(f"✅ Улучшение для уровня {lvl} сохранено!", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 # ---------------------------------------------
@@ -2169,7 +2174,6 @@ async def edit_crate_units_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminCrateAdd.unit_builder)
     await state.update_data(name=c_data['name'], price=c_data['price'], photo=c_data.get('photo'), units={}, editing_crate_id=cid)
     await show_crate_builder(cb, state)
-
 
 # ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК УСТАНОВКИ ЗНАЧЕНИЙ
 @dp.callback_query(StateFilter('*'), F.data.startswith("set_"))
