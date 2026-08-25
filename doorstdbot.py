@@ -340,6 +340,10 @@ class AdminCrateAdd(StatesGroup):
     unit_builder = State()
     waiting_unit_weight = State()
 
+class AdminCrateBannerAdd(StatesGroup):
+    unit_builder = State()
+    waiting_unit_weight = State()
+
 class AdminSettingsEdit(StatesGroup):
     waiting_for_coins_per_damage = State()
     waiting_for_turn_time_skip = State()
@@ -1921,7 +1925,9 @@ async def crb_finish(cb: CallbackQuery, state: FSMContext):
         "price": data["price"],
         "currency": "💰 Монеты",
         "units": data["units"],
-        "photo": data.get("photo")
+        "photo": data.get("photo"),
+        "banners": [{"units": data["units"]}],
+        "current_banner_index": 0
     }
     crate_id_counter += 1
     save_data()
@@ -2162,7 +2168,8 @@ async def edit_crate_menu(cb: CallbackQuery):
     kb = [
         [InlineKeyboardButton(text=f"Название ({c.get('name')})", callback_data=f"set_c_{cid}_name")],
         [InlineKeyboardButton(text=f"Цена ({c.get('price')})", callback_data=f"set_c_{cid}_price")],
-        [InlineKeyboardButton(text="🔄 Изменить содержимое (перезапись)", callback_data=f"recrate_{cid}")],
+        [InlineKeyboardButton(text="🔄 Изменить текущее содержимое", callback_data=f"recrate_{cid}")],
+        [InlineKeyboardButton(text="🏷 Настроить Баннеры (Ротация)", callback_data=f"cr_bans_{cid}")],
         [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_edit_crate_list")]
     ]
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -2174,6 +2181,126 @@ async def edit_crate_units_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminCrateAdd.unit_builder)
     await state.update_data(name=c_data['name'], price=c_data['price'], photo=c_data.get('photo'), units={}, editing_crate_id=cid)
     await show_crate_builder(cb, state)
+
+# --- НАСТРОЙКА БАННЕРОВ ДЛЯ КРЕЙТА ---
+@dp.callback_query(StateFilter('*'), F.data.startswith("cr_bans_"))
+async def crate_banners_menu(cb: CallbackQuery, state: FSMContext):
+    cid = cb.data.split("_")[2]
+    c = crates_db.get(cid)
+    if not c: return await cb.answer("Крейт не найден!", show_alert=True)
+
+    if "banners" not in c or not c["banners"]:
+        c["banners"] = [{"units": c.get("units", {})}]
+        c["current_banner_index"] = 0
+        save_data()
+
+    text = f"🏷 <b>Баннеры для крейта: {c.get('name')}</b>\n"
+    text += f"Текущий активный баннер: №{c.get('current_banner_index', 0) + 1}\n"
+    text += "<i>Баннеры сменяются автоматически каждый час.</i>\n\n"
+
+    for i, banner in enumerate(c["banners"]):
+        text += f"<b>Баннер {i+1}:</b>\n"
+        for uid, w in banner["units"].items():
+            u_name = units_db.get(str(uid), {}).get("name", f"Юнит {uid}")
+            text += f" - {u_name} (Вес: {w})\n"
+        text += "\n"
+
+    kb = [
+        [InlineKeyboardButton(text="➕ Добавить Баннер", callback_data=f"cr_ban_add_{cid}")],
+    ]
+    if len(c["banners"]) > 1:
+        kb.append([InlineKeyboardButton(text="🗑 Удалить последний баннер", callback_data=f"cr_ban_del_{cid}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад к крейту", callback_data=f"ed_c_{cid}")])
+
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("cr_ban_add_"))
+async def cr_ban_add_start(cb: CallbackQuery, state: FSMContext):
+    cid = cb.data.split("_")[3]
+    await state.set_state(AdminCrateBannerAdd.unit_builder)
+    await state.update_data(editing_crate_id=cid, temp_units={})
+    await show_banner_builder(cb, state)
+
+async def show_banner_builder(m_or_cb, state: FSMContext):
+    data = await state.get_data()
+    temp_units = data.get("temp_units", {})
+    cid = data["editing_crate_id"]
+    c_name = crates_db[cid]['name']
+
+    text = f"🏷 <b>Создание нового баннера для: {c_name}</b>\nСодержимое:\n"
+    if not temp_units: text += " └ <i>Пусто</i>\n"
+    else:
+        for uid, weight in temp_units.items():
+            u = units_db.get(str(uid), {})
+            text += f" ├ {u.get('name', 'Юнит')} (Вес: {weight})\n"
+
+    kb = []
+    row = []
+    for uid, u in units_db.items():
+        row.append(InlineKeyboardButton(text=u.get("name", f"Юнит {uid}"), callback_data=f"crban_selu_{uid}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row: kb.append(row)
+
+    if temp_units: kb.append([InlineKeyboardButton(text="💾 Завершить Баннер", callback_data="crban_finish")])
+    kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data=f"cr_bans_{cid}")])
+
+    rm = InlineKeyboardMarkup(inline_keyboard=kb)
+    if isinstance(m_or_cb, Message): await m_or_cb.answer(text, reply_markup=rm)
+    else: await m_or_cb.message.edit_text(text, reply_markup=rm)
+
+@dp.callback_query(AdminCrateBannerAdd.unit_builder, F.data.startswith("crban_selu_"))
+async def crban_select_unit(cb: CallbackQuery, state: FSMContext):
+    uid = cb.data.split("_")[2]
+    await state.update_data(selected_unit=uid)
+    await state.set_state(AdminCrateBannerAdd.waiting_unit_weight)
+    await cb.message.edit_text("⚖️ Введите ВЕС (шанс) выпадения этого юнита для нового баннера:")
+    await cb.answer()
+
+@dp.message(AdminCrateBannerAdd.waiting_unit_weight)
+async def crban_unit_weight(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("Введите число.")
+    data = await state.get_data()
+    temp_units = data.get("temp_units", {})
+    temp_units[data["selected_unit"]] = int(m.text)
+    await state.update_data(temp_units=temp_units)
+    await state.set_state(AdminCrateBannerAdd.unit_builder)
+    await show_banner_builder(m, state)
+
+@dp.callback_query(AdminCrateBannerAdd.unit_builder, F.data == "crban_finish")
+async def crban_finish(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    cid = data["editing_crate_id"]
+    temp_units = data["temp_units"]
+
+    c = crates_db[cid]
+    if "banners" not in c:
+        c["banners"] = [{"units": c.get("units", {})}]
+    c["banners"].append({"units": temp_units})
+
+    save_data()
+    await state.clear()
+    cb.data = f"cr_bans_{cid}"
+    await crate_banners_menu(cb, state)
+    await cb.answer("Баннер добавлен!")
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("cr_ban_del_"))
+async def cr_ban_del(cb: CallbackQuery, state: FSMContext):
+    cid = cb.data.split("_")[3]
+    c = crates_db.get(cid)
+    if not c or len(c.get("banners", [])) <= 1:
+        return await cb.answer("Нельзя удалить единственный баннер!", show_alert=True)
+
+    c["banners"].pop()
+    if c.get("current_banner_index", 0) >= len(c["banners"]):
+        c["current_banner_index"] = 0
+        c["units"] = c["banners"][0]["units"]
+    save_data()
+    cb.data = f"cr_bans_{cid}"
+    await crate_banners_menu(cb, state)
+    await cb.answer("Последний баннер удален!")
 
 # ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК УСТАНОВКИ ЗНАЧЕНИЙ
 @dp.callback_query(StateFilter('*'), F.data.startswith("set_"))
@@ -2208,6 +2335,9 @@ async def generic_edit_receive(m: Message, state: FSMContext):
         mobs_db[e_id][field] = val
     elif e_type == "c" and e_id in crates_db:
         crates_db[e_id][field] = val
+        if field == "units": # Синхронизация с баннерами при прямой перезаписи
+            crates_db[e_id]["banners"] = [{"units": val}]
+            crates_db[e_id]["current_banner_index"] = 0
         
     save_data()
     await state.clear()
@@ -2231,7 +2361,7 @@ async def admin_export_csv(cb: CallbackQuery):
     file = BufferedInputFile(out_u.getvalue().encode('utf-8'), filename="game_tables.csv")
     await cb.message.answer_document(
         file, 
-        caption="📊 <b>Ваши таблицы для редактирования готовы!</b>\n\nВы можете открыть файл <code>game_tables.csv</code> в Excel, изменить урон, цены или ХП, и отправить его обратно мне. \n\n❗️ В подписи к файлу напишите: <code>/import_csv</code>"
+        caption="📊 <b>Ваши таблицы для редактирования готовы!</b>\n\nВы ক্ষমতায় открыть файл <code>game_tables.csv</code> в Excel, изменить урон, цены или ХП, и отправить его обратно мне. \n\n❗️ В подписи к файлу напишите: <code>/import_csv</code>"
     )
     await cb.answer()
 
@@ -2494,7 +2624,7 @@ async def handle_any_text(m: Message, state: FSMContext):
     if m.chat.type in {"group", "supergroup"}: return
     await safe_exit_and_menu(m, state)
 
-# --- АВТО БЭКАП ---
+# --- АВТО БЭКАП И РОТАЦИЯ КРЕЙТОВ ---
 async def hourly_backup_task(bot: Bot):
     while True:
         await asyncio.sleep(3600) 
@@ -2504,6 +2634,27 @@ async def hourly_backup_task(bot: Bot):
             await bot.send_document(chat_id=MAIN_ADMIN_ID, document=file, caption="🕒 Автоматический бэкап (раз в час).")
         except Exception as e:
             logging.error(f"Ошибка при автоматическом бэкапе: {e}")
+
+async def hourly_crate_rotation_task(bot: Bot):
+    while True:
+        await asyncio.sleep(3600) # Ждем ровно один час
+        try:
+            rotated = False
+            for cid, c in crates_db.items():
+                banners = c.get("banners", [])
+                if len(banners) > 1:
+                    idx = c.get("current_banner_index", 0)
+                    idx = (idx + 1) % len(banners)
+                    c["current_banner_index"] = idx
+                    # Перезаписываем активное содержимое крейта на содержимое текущего баннера
+                    c["units"] = banners[idx]["units"]
+                    rotated = True
+            
+            if rotated:
+                save_data()
+                logging.info("♻️ Крейты успешно обновили свои баннеры (ротация).")
+        except Exception as e:
+            logging.error(f"Ошибка ротации крейтов: {e}")
 
 # ==========================================
 # ЗАПУСК БОТА
@@ -2520,6 +2671,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     
     asyncio.create_task(hourly_backup_task(bot))
+    asyncio.create_task(hourly_crate_rotation_task(bot)) # Запускаем таймер смены баннеров
     
     try: await dp.start_polling(bot)
     finally: await bot.session.close()
