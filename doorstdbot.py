@@ -339,6 +339,7 @@ class AdminCrateAdd(StatesGroup):
     photo = State()
     unit_builder = State()
     waiting_unit_weight = State()
+    banner_menu = State()
 
 class AdminCrateBannerAdd(StatesGroup):
     unit_builder = State()
@@ -1239,7 +1240,6 @@ async def cleanup_battle(battle_id: str, bot: Bot):
         del active_tasks[battle_id]
     del active_battles[battle_id]
 
-# --- ОБРАБОТЧИКИ УЛУЧШЕНИЙ И БОЯ ---
 @dp.callback_query(StateFilter('*'), F.data.startswith("b_switch_mode_"))
 async def battle_toggle_mode(callback: CallbackQuery):
     battle_id = callback.data.split("_")[3]
@@ -1848,7 +1848,7 @@ async def a_del_map_act(cb: CallbackQuery, state: FSMContext):
 async def admin_add_crate(cb: CallbackQuery, state: FSMContext):
     if not units_db: return await cb.answer("Сначала создайте юнитов!", show_alert=True)
     await state.set_state(AdminCrateAdd.name)
-    await state.update_data(units={})
+    await state.update_data(units={}, banners=[])
     await cb.message.edit_text("📦 Введите название Крейта:")
 
 @dp.message(AdminCrateAdd.name)
@@ -1869,14 +1869,20 @@ async def admin_crate_photo(m: Message, state: FSMContext):
     if m.photo: await state.update_data(photo=m.photo[-1].file_id)
     elif m.text and m.text.lower() == "пропустить": await state.update_data(photo=None)
     else: return await m.answer("⚠️ Отправьте фото или напишите 'Пропустить'.")
+    
+    await state.update_data(banners=[], units={})
     await show_crate_builder(m, state)
 
 async def show_crate_builder(m_or_cb, state: FSMContext):
     data = await state.get_data()
     crate_units = data.get("units", {})
+    banners = data.get("banners", [])
+    b_num = len(banners) + 1
+    
     await state.set_state(AdminCrateAdd.unit_builder)
     
-    text = f"📦 <b>Крейт: {data['name']}</b>\nСодержимое:\n"
+    text = f"📦 <b>Крейт: {data['name']}</b>\n"
+    text += f"🏷 <b>Сборка Баннера №{b_num}</b>\nСодержимое:\n"
     if not crate_units: text += " └ <i>Пусто</i>\n"
     else:
         for uid, weight in crate_units.items():
@@ -1892,7 +1898,7 @@ async def show_crate_builder(m_or_cb, state: FSMContext):
             row = []
     if row: kb.append(row)
     
-    if crate_units: kb.append([InlineKeyboardButton(text="💾 Завершить Крейт", callback_data="crb_finish")])
+    if crate_units: kb.append([InlineKeyboardButton(text="💾 Завершить текущий баннер", callback_data="crb_finish_banner")])
         
     rm = InlineKeyboardMarkup(inline_keyboard=kb)
     if isinstance(m_or_cb, Message): await m_or_cb.answer(text, reply_markup=rm)
@@ -1915,24 +1921,57 @@ async def crb_unit_weight(m: Message, state: FSMContext):
     await state.update_data(units=crate_units)
     await show_crate_builder(m, state)
 
-@dp.callback_query(AdminCrateAdd.unit_builder, F.data == "crb_finish")
-async def crb_finish(cb: CallbackQuery, state: FSMContext):
+@dp.callback_query(AdminCrateAdd.unit_builder, F.data == "crb_finish_banner")
+async def crb_finish_banner(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    global crate_id_counter
-    cid = str(crate_id_counter)
-    crates_db[cid] = {
-        "name": data["name"],
-        "price": data["price"],
-        "currency": "💰 Монеты",
-        "units": data["units"],
-        "photo": data.get("photo"),
-        "banners": [{"units": data["units"]}],
-        "current_banner_index": 0
-    }
-    crate_id_counter += 1
-    save_data()
-    await state.clear()
-    await send_main_screen(cb.message, f"✅ Крейт «{data['name']}» добавлен!")
+    banners = data.get("banners", [])
+    banners.append({"units": data.get("units", {})})
+    await state.update_data(banners=banners, units={}) 
+    
+    await state.set_state(AdminCrateAdd.banner_menu)
+    text = f"✅ <b>Баннер №{len(banners)} сохранен!</b>\nВсего баннеров в крейте: {len(banners)}\n\nЧто делаем дальше?"
+    kb = [
+        [InlineKeyboardButton(text="➕ Создать следующий баннер", callback_data="crb_next_banner")],
+        [InlineKeyboardButton(text="💾 Завершить создание Крейта", callback_data="crb_finish_crate")]
+    ]
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+@dp.callback_query(AdminCrateAdd.banner_menu, F.data == "crb_next_banner")
+async def crb_next_banner(cb: CallbackQuery, state: FSMContext):
+    await show_crate_builder(cb, state)
+    await cb.answer()
+
+@dp.callback_query(AdminCrateAdd.banner_menu, F.data == "crb_finish_crate")
+async def crb_finish_crate(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    banners = data.get("banners", [])
+    if not banners: return await cb.answer("В крейте должен быть хотя бы один баннер!", show_alert=True)
+    
+    cid = data.get("editing_crate_id")
+    if cid:
+        crates_db[cid]["units"] = banners[0]["units"]
+        crates_db[cid]["banners"] = banners
+        crates_db[cid]["current_banner_index"] = 0
+        save_data()
+        await state.clear()
+        await send_main_screen(cb.message, f"✅ Содержимое крейта «{crates_db[cid]['name']}» перезаписано ({len(banners)} баннеров)!")
+    else:
+        global crate_id_counter
+        new_cid = str(crate_id_counter)
+        crates_db[new_cid] = {
+            "name": data["name"],
+            "price": data["price"],
+            "currency": "💰 Монеты",
+            "units": banners[0]["units"],
+            "photo": data.get("photo"),
+            "banners": banners,
+            "current_banner_index": 0
+        }
+        crate_id_counter += 1
+        save_data()
+        await state.clear()
+        await send_main_screen(cb.message, f"✅ Крейт «{data['name']}» добавлен с {len(banners)} баннерами!")
     await cb.answer()
 
 @dp.callback_query(StateFilter('*'), F.data == "admin_del_crate")
@@ -2168,7 +2207,7 @@ async def edit_crate_menu(cb: CallbackQuery):
     kb = [
         [InlineKeyboardButton(text=f"Название ({c.get('name')})", callback_data=f"set_c_{cid}_name")],
         [InlineKeyboardButton(text=f"Цена ({c.get('price')})", callback_data=f"set_c_{cid}_price")],
-        [InlineKeyboardButton(text="🔄 Изменить текущее содержимое", callback_data=f"recrate_{cid}")],
+        [InlineKeyboardButton(text="🔄 Изменить содержимое (перезапись)", callback_data=f"recrate_{cid}")],
         [InlineKeyboardButton(text="🏷 Настроить Баннеры (Ротация)", callback_data=f"cr_bans_{cid}")],
         [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_edit_crate_list")]
     ]
@@ -2179,15 +2218,13 @@ async def edit_crate_units_start(cb: CallbackQuery, state: FSMContext):
     cid = cb.data.split("_")[1]
     c_data = crates_db.get(cid)
     await state.set_state(AdminCrateAdd.unit_builder)
-    await state.update_data(name=c_data['name'], price=c_data['price'], photo=c_data.get('photo'), units={}, editing_crate_id=cid)
+    await state.update_data(name=c_data['name'], price=c_data['price'], photo=c_data.get('photo'), units={}, banners=[], editing_crate_id=cid)
     await show_crate_builder(cb, state)
 
 # --- НАСТРОЙКА БАННЕРОВ ДЛЯ КРЕЙТА ---
-@dp.callback_query(StateFilter('*'), F.data.startswith("cr_bans_"))
-async def crate_banners_menu(cb: CallbackQuery, state: FSMContext):
-    cid = cb.data.split("_")[2]
+async def render_crate_banners_menu(message: Message, cid: str):
     c = crates_db.get(cid)
-    if not c: return await cb.answer("Крейт не найден!", show_alert=True)
+    if not c: return
 
     if "banners" not in c or not c["banners"]:
         c["banners"] = [{"units": c.get("units", {})}]
@@ -2212,7 +2249,13 @@ async def crate_banners_menu(cb: CallbackQuery, state: FSMContext):
         kb.append([InlineKeyboardButton(text="🗑 Удалить последний баннер", callback_data=f"cr_ban_del_{cid}")])
     kb.append([InlineKeyboardButton(text="🔙 Назад к крейту", callback_data=f"ed_c_{cid}")])
 
-    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    try: await message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    except Exception: pass
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("cr_bans_"))
+async def crate_banners_menu(cb: CallbackQuery, state: FSMContext):
+    cid = cb.data.split("_")[2]
+    await render_crate_banners_menu(cb.message, cid)
     await cb.answer()
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("cr_ban_add_"))
@@ -2282,8 +2325,8 @@ async def crban_finish(cb: CallbackQuery, state: FSMContext):
 
     save_data()
     await state.clear()
-    cb.data = f"cr_bans_{cid}"
-    await crate_banners_menu(cb, state)
+    
+    await render_crate_banners_menu(cb.message, cid)
     await cb.answer("Баннер добавлен!")
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("cr_ban_del_"))
@@ -2298,8 +2341,8 @@ async def cr_ban_del(cb: CallbackQuery, state: FSMContext):
         c["current_banner_index"] = 0
         c["units"] = c["banners"][0]["units"]
     save_data()
-    cb.data = f"cr_bans_{cid}"
-    await crate_banners_menu(cb, state)
+    
+    await render_crate_banners_menu(cb.message, cid)
     await cb.answer("Последний баннер удален!")
 
 # ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК УСТАНОВКИ ЗНАЧЕНИЙ
@@ -2361,7 +2404,7 @@ async def admin_export_csv(cb: CallbackQuery):
     file = BufferedInputFile(out_u.getvalue().encode('utf-8'), filename="game_tables.csv")
     await cb.message.answer_document(
         file, 
-        caption="📊 <b>Ваши таблицы для редактирования готовы!</b>\n\nВы ক্ষমতায় открыть файл <code>game_tables.csv</code> в Excel, изменить урон, цены или ХП, и отправить его обратно мне. \n\n❗️ В подписи к файлу напишите: <code>/import_csv</code>"
+        caption="📊 <b>Ваши таблицы для редактирования готовы!</b>\n\nВы можете открыть файл <code>game_tables.csv</code> в Excel, изменить урон, цены или ХП, и отправить его обратно мне. \n\n❗️ В подписи к файлу напишите: <code>/import_csv</code>"
     )
     await cb.answer()
 
