@@ -85,7 +85,7 @@ user_inventory = {}  # {uid_str: {"item_str": count}}
 user_equipped = {}   
 user_balances = {} 
 user_free_crate_times = {} 
-currencies_db = ["💰 Монеты", "💎 Гемы"] 
+currencies_db = ["💰 Монеты"] 
 maps_db = {}       
 map_id_counter = 1
 crates_db = {}     
@@ -98,7 +98,6 @@ bot_settings = {
     "turn_time_noskip": 10
 }
 
-# Добавлен класс Гений
 ATTACK_TYPES = ["Одиночный", "Сплеш", "АОЕ", "Саппорт", "Ферма", "Замедление", "Оглушение", "Горение", "Гений"]
 UNIT_TARGET_TYPES = ["Наземный", "Анти-Воздух", "Детектор", "Универсал"]
 MOB_TRAITS = ["Обычный", "Летающий", "Камуфляж"]
@@ -162,16 +161,27 @@ def load_data():
         mobs_db = data.get("mobs_db", {})
         mob_id_counter = data.get("mob_id_counter", 1)
         
-        currencies_db = data.get("currencies_db", ["💰 Монеты", "💎 Гемы"])
+        # Очистка валюты от Гемов
+        currencies_db = data.get("currencies_db", ["💰 Монеты"])
         if "💰 Монеты" not in currencies_db: currencies_db.insert(0, "💰 Монеты")
+        if "💎 Гемы" in currencies_db: currencies_db.remove("💎 Гемы")
         
         maps_db = data.get("maps_db", {})
+        for m_id, m_data in maps_db.items():
+            if "rewards" in m_data and "💎 Гемы" in m_data["rewards"]:
+                del m_data["rewards"]["💎 Гемы"]
+                
         map_id_counter = data.get("map_id_counter", 1)
         crates_db = data.get("crates_db", {})
         crate_id_counter = data.get("crate_id_counter", 1)
         
         user_equipped = {str(k): list(v) for k, v in data.get("user_equipped", {}).items()}
+        
         user_balances = data.get("user_balances", {})
+        for uid, bals in user_balances.items():
+            if "💎 Гемы" in bals:
+                del bals["💎 Гемы"]
+                
         user_free_crate_times = {str(k): float(v) for k, v in data.get("user_free_crate_times", {}).items()}
         
         # Миграция инвентаря в стаки
@@ -181,19 +191,22 @@ def load_data():
             if isinstance(v, dict):
                 user_inventory[str(k)] = {item: count for item, count in v.items()}
             else:
-                user_inventory[str(k)] = {item: 1 for item in v} 
+                user_inventory[str(k)] = {}
+                for item in v:
+                    user_inventory[str(k)][item] = user_inventory[str(k)].get(item, 0) + 1
 
-        units_exist_stats = data.get("units_exist_stats", {})
-        if not units_exist_stats:
-            for u_inv in user_inventory.values():
-                for item_str, count in u_inv.items():
-                    uid, is_shiny_str = item_str.split(":")
-                    if uid not in units_exist_stats:
-                        units_exist_stats[uid] = {"normal": 0, "shiny": 0}
-                    if is_shiny_str == "1":
-                        units_exist_stats[uid]["shiny"] += count
-                    else:
-                        units_exist_stats[uid]["normal"] += count
+        # Пересчёт экзистов с игнором Главного Админа
+        units_exist_stats = {}
+        for u_id_str, u_inv in user_inventory.items():
+            if str(u_id_str) == MAIN_ADMIN_ID: continue
+            for item_str, count in u_inv.items():
+                uid, is_shiny_str = item_str.split(":")
+                if uid not in units_exist_stats:
+                    units_exist_stats[uid] = {"normal": 0, "shiny": 0}
+                if is_shiny_str == "1":
+                    units_exist_stats[uid]["shiny"] += count
+                else:
+                    units_exist_stats[uid]["normal"] += count
                         
     except Exception as e:
         logging.error(f"⚠️ Ошибка загрузки из SQLite: {e}")
@@ -308,7 +321,6 @@ def format_unit_stats(u):
     
     res = f"├ 💎 Редкость: <b>{rarity_str}</b>\n├ 🏷 Классы: <b>{types_str}</b>\n├ 🎯 Цели: <b>{target_str}</b>\n├ 💰 Цена: {u.get('deploy_cost', 50)} | 🛑 Лимит: {u.get('supply_limit', '∞')}\n"
     
-    # Теперь любой атакующий/дебафающий класс будет выводить базовый Урон и КД, если они у него есть
     if any(t in utypes for t in ["Одиночный", "Сплеш", "АОЕ", "Замедление", "Оглушение", "Горение", "Гений"]):
         dmg = u.get('damage')
         cd = u.get('cd')
@@ -356,7 +368,6 @@ class AdminMapAdd(StatesGroup):
     waiting_mob_count = State()
     waiting_wave_turns = State()
     waiting_reward_coins = State()
-    waiting_reward_gems = State()
 
 class AdminRarityAdd(StatesGroup):
     waiting_for_name = State()
@@ -423,7 +434,6 @@ class AdminUnitUpg(StatesGroup):
     add_c = State()
     rem_c = State()
     targ = State()
-    # stats
     dmg = State()
     cd = State()
     cd_boost = State()
@@ -496,11 +506,11 @@ def extract_user_identifier(message: Message) -> str | None:
 
 def init_user_balance(user_id_str: str):
     if user_id_str not in user_balances:
-        user_balances[user_id_str] = {"💰 Монеты": 100, "💎 Гемы": 0}
+        user_balances[user_id_str] = {"💰 Монеты": 100}
         save_data()
 
 def get_welcome_text(user_id_str: str, user_name: str) -> str:
-    bal = user_balances.get(user_id_str, {"💰 Монеты": 100, "💎 Гемы": 0})
+    bal = user_balances.get(user_id_str, {"💰 Монеты": 100})
     
     bal_text = ""
     for cur in currencies_db:
@@ -556,7 +566,7 @@ def get_inventory_page(user_id_str: str, page: int):
     start_idx = (page - 1) * ITEMS_PER_PAGE
     page_items = all_items[start_idx:start_idx + ITEMS_PER_PAGE]
     
-    bal = user_balances.get(user_id_str, {"💰 Монеты": 100, "💎 Гемы": 0})
+    bal = user_balances.get(user_id_str, {"💰 Монеты": 100})
     bal_text = " | ".join([f"<b>{bal.get(c, 0)}</b> {c}" for c in currencies_db])
     
     text = f"🎒 <b>ИНВЕНТАРЬ (Стр. {page}/{total_pages})</b>\n💳 Баланс: {bal_text}\n━━━━━━━━━━━━━━━━━━\n"
@@ -586,7 +596,6 @@ def get_equip_page(user_id_str: str, page: int):
     equipped = user_equipped.get(user_id_str, [])
     inv = user_inventory.get(user_id_str, {})
     
-    # Очистка невалидных
     equipped = [item for item in equipped if item.split(":")[0] in units_db and item in inv]
     if len(equipped) != len(user_equipped.get(user_id_str, [])):
         user_equipped[user_id_str] = equipped
@@ -897,6 +906,7 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
             if cur.get('slow_duration', 0) != nxt.get('slow_duration', 0): diffs.append(f"Длит. зам.: {cur.get('slow_duration',0)}с ➡️ {nxt.get('slow_duration',0)}с")
             if cur.get('stun_chance', 0) != nxt.get('stun_chance', 0): diffs.append(f"Стан %: {cur.get('stun_chance',0)} ➡️ {nxt.get('stun_chance',0)}")
             if cur.get('burn_damage', 0) != nxt.get('burn_damage', 0): diffs.append(f"Урон огня: {cur.get('burn_damage',0)} ➡️ {nxt.get('burn_damage',0)}")
+            if cur.get('income', 0) != nxt.get('income', 0): diffs.append(f"Доход: {cur.get('income',0)} ➡️ {nxt.get('income',0)}")
             
             diff_str = ", ".join(diffs) if diffs else "Новые классы/Особые эффекты"
             upg_text += f"• <b>{cur.get('name')}</b> (Ур.{nxt_lvl}): {diff_str}\n"
@@ -1016,7 +1026,7 @@ async def cq_crate_open(callback: CallbackQuery, state: FSMContext):
     
     total_cost = crate["price"] * amount
     req_cur = crate.get("currency", "💰 Монеты")
-    bal = user_balances.get(user_id_str, {"💰 Монеты": 100, "💎 Гемы": 0})
+    bal = user_balances.get(user_id_str, {"💰 Монеты": 100})
     
     if bal.get(req_cur, 0) < total_cost:
         return await callback.answer(f"Недостаточно средств! Требуется {total_cost} {req_cur}.", show_alert=True)
@@ -1034,9 +1044,11 @@ async def cq_crate_open(callback: CallbackQuery, state: FSMContext):
         counts[item_str] = counts.get(item_str, 0) + 1
         user_inventory[user_id_str][item_str] = user_inventory[user_id_str].get(item_str, 0) + 1
         
-        if uid not in units_exist_stats: units_exist_stats[uid] = {"normal": 0, "shiny": 0}
-        if is_shiny: units_exist_stats[uid]["shiny"] += 1
-        else: units_exist_stats[uid]["normal"] += 1
+        # ЗАПРЕЩАЕМ ГЛАВНОМУ АДМИНУ ПОРТИТЬ СТАТИСТИКУ ЭКЗИСТОВ
+        if user_id_str != MAIN_ADMIN_ID:
+            if uid not in units_exist_stats: units_exist_stats[uid] = {"normal": 0, "shiny": 0}
+            if is_shiny: units_exist_stats[uid]["shiny"] += 1
+            else: units_exist_stats[uid]["normal"] += 1
         
     save_data()
     
@@ -1341,7 +1353,6 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                             target_mob["burn_duration"] = u_stats.get("burn_duration", 3)
                             target_mob["burn_damage"] = u_stats.get("burn_damage", 5)
 
-                # Гений наносит чистый урон без учета брони
                 def calc_dmg(target_mob):
                     if "Гений" in utypes: return round(dmg_base, 2)
                     return round(dmg_base * (1 - target_mob["def"] / 100), 2)
@@ -1438,14 +1449,31 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
     battle = active_battles[battle_id]
     chat_id = battle["chat_id"]
     m_data = maps_db[battle["map_id"]]
-    rew = m_data.get("rewards", {})
+    rew = m_data.get("rewards", {}).copy()
+    
+    cleared_waves = battle["current_wave"] - 1
+    if is_win: cleared_waves = m_data["waves_total"]
     
     text = "❇️❇️❇️ <b>ПОБЕДА В БОЮ!</b> ❇️❇️❇️\n\nНаграды:\n" if is_win else "📛📛📛 <b>ПОРАЖЕНИЕ (БАЗА УНИЧТОЖЕНА)</b> 📛📛📛\n\nУтешительный приз:\n"
+    
+    final_rewards = {}
     for k, v in rew.items():
         amt = v if is_win else max(1, int(v * 0.1))
-        text += f"+{amt} {k}\n"
+        final_rewards[k] = final_rewards.get(k, 0) + amt
+        
+    # БОНУС: 1 МОНЕТА ЗА 1 ВОЛНУ
+    if cleared_waves > 0:
+        final_rewards["💰 Монеты"] = final_rewards.get("💰 Монеты", 0) + cleared_waves
+
+    for k, amt in final_rewards.items():
+        if amt > 0:
+            if k == "💰 Монеты" and cleared_waves > 0:
+                text += f"+{amt} {k} <i>(вкл. +{cleared_waves} за пройденные волны)</i>\n"
+            else:
+                text += f"+{amt} {k}\n"
+                
         for p_uid in battle["players"].keys():
-            bal = user_balances.get(p_uid, {"💰 Монеты": 100, "💎 Гемы": 0})
+            bal = user_balances.get(p_uid, {"💰 Монеты": 100})
             bal[k] = bal.get(k, 0) + amt
             user_balances[p_uid] = bal
             
@@ -2039,18 +2067,11 @@ async def mapb_wave_turns(m: Message, state: FSMContext):
 @dp.callback_query(AdminMapAdd.wave_builder, F.data == "mapb_finish")
 async def mapb_finish(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminMapAdd.waiting_reward_coins)
-    await cb.message.edit_text("💰 Введите награду за победу (Количество Монет):")
+    await cb.message.edit_text("💰 Введите базовую награду за победу (Количество Монет):")
     await cb.answer()
 
 @dp.message(AdminMapAdd.waiting_reward_coins)
 async def map_reward_coins(m: Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("Введите число.")
-    await state.update_data(reward_coins=int(m.text))
-    await state.set_state(AdminMapAdd.waiting_reward_gems)
-    await m.answer("💎 Введите награду за победу (Количество Гемов):")
-
-@dp.message(AdminMapAdd.waiting_reward_gems)
-async def map_reward_gems(m: Message, state: FSMContext):
     if not m.text.isdigit(): return await m.answer("Введите число.")
     data = await state.get_data()
     global map_id_counter
@@ -2061,7 +2082,7 @@ async def map_reward_gems(m: Message, state: FSMContext):
         "starting_coins": 100,
         "waves_total": len(data["waves"]),
         "waves": data["waves"],
-        "rewards": {"💰 Монеты": data["reward_coins"], "💎 Гемы": int(m.text)}
+        "rewards": {"💰 Монеты": int(m.text)}
     }
     map_id_counter += 1
     save_data()
@@ -2330,7 +2351,6 @@ async def u_upg_targ(cb: CallbackQuery, state: FSMContext):
     
     if action != "skip": await state.update_data(targ=UNIT_TARGET_TYPES[int(action)])
     
-    # Определяем активные классы на этом уровне для запроса нужных статов
     active_classes = u_base.get("unit_types", []).copy()
     for c in data.get("temp_add", []):
         if c not in active_classes: active_classes.append(c)
@@ -2392,7 +2412,6 @@ async def jump_next_upg_stat(m: Message, state: FSMContext):
         await state.set_state(AdminUnitUpg.burn_dur)
         return await m.answer("⏳ [Горение] Длительность горения (или '-'):")
 
-    # Сохраняем все данные
     uid = data["uid"]
     lvl = data["level"]
     upg_dict = {
@@ -2865,7 +2884,7 @@ async def admin_give_cur_step4(m: Message, state: FSMContext):
 @dp.callback_query(StateFilter('*'), F.data == "admin_add_cur")
 async def a_add_cur(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminCurAdd.name)
-    await cb.message.edit_text("🪙 Введите название новой валюты (например '💎 Алмазы'):")
+    await cb.message.edit_text("🪙 Введите название новой валюты:")
 
 @dp.message(AdminCurAdd.name)
 async def a_add_cur_name(m: Message, state: FSMContext):
