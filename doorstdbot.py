@@ -1,6 +1,15 @@
 import sys
 import subprocess
 import os
+import asyncio
+import logging
+import json
+import random
+import time
+import io
+import csv
+import urllib.request
+import sqlite3
 
 def install_missing_packages():
     packages_to_install = []
@@ -20,15 +29,6 @@ def install_missing_packages():
 
 install_missing_packages()
 
-import asyncio
-import logging
-import json
-import random
-import time
-import io
-import csv
-import urllib.request
-import sqlite3
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.types import (
     Message, 
@@ -84,6 +84,7 @@ mob_id_counter = 1
 user_inventory = {}  
 user_equipped = {}   
 user_balances = {} 
+user_profiles = {} # Уровни и опыт
 user_free_crate_times = {} 
 currencies_db = ["💰 Монеты"] 
 maps_db = {}       
@@ -113,8 +114,70 @@ panel_owners = {}
 image_cache = {}
 
 # ==========================================
-# 2. СИСТЕМА SQLITE
+# 2. СИСТЕМА УРОВНЕЙ И БД
 # ==========================================
+def get_title(lvl):
+    if lvl < 10: return "🟢 Новичок"
+    if lvl < 20: return "🔵 Опытный"
+    if lvl < 30: return "🟣 Ветеран"
+    if lvl < 40: return "🔴 Элита"
+    if lvl < 50: return "👑 Мастер"
+    return "🌟 Легенда"
+
+def get_exp_req(lvl):
+    if lvl >= 50: return 999999999
+    return int(100 * (lvl ** 1.5))
+
+def add_exp(uid, amount):
+    if uid not in user_profiles: user_profiles[uid] = {"level": 1, "exp": 0}
+    prof = user_profiles[uid]
+    if prof["level"] >= 50: return False
+    
+    prof["exp"] += amount
+    leveled_up = False
+    while prof["level"] < 50 and prof["exp"] >= get_exp_req(prof["level"]):
+        prof["exp"] -= get_exp_req(prof["level"])
+        prof["level"] += 1
+        leveled_up = True
+    user_profiles[uid] = prof
+    return leveled_up
+
+def get_bonuses_data(lvl):
+    start_c = 0
+    if lvl >= 30: start_c = 100
+    elif lvl >= 10: start_c = 50
+    
+    disc = 0.0
+    if lvl >= 45: disc = 0.15
+    elif lvl >= 30: disc = 0.10
+    elif lvl >= 15: disc = 0.05
+    
+    slots = 5
+    if lvl >= 40: slots = 7
+    elif lvl >= 20: slots = 6
+    
+    shiny = 0.05
+    if lvl >= 50: shiny = 0.12
+    elif lvl >= 25: shiny = 0.08
+    
+    mult = 1.0 + (lvl // 10) * 0.1
+    supply_bonus = 0
+    if lvl >= 40: supply_bonus = 2
+    elif lvl >= 20: supply_bonus = 1
+    
+    return slots, shiny, disc, start_c, mult, supply_bonus
+
+def get_bonuses_text(lvl):
+    slots, shiny, disc, start_c, mult, sup = get_bonuses_data(lvl)
+    text = f"• База: <b>+{lvl - 1} ХП</b>\n"
+    text += f"• Бонусные монеты старта: <b>+{start_c + lvl - 1}</b>\n"
+    text += f"• Скидка в бою: <b>{int(disc*100)}%</b>\n"
+    text += f"• Слотов в колоде: <b>{slots}</b>\n"
+    text += f"• Бонус к лимиту юнитов: <b>+{sup}</b>\n"
+    text += f"• Шанс Шайни: <b>{int(shiny*100)}%</b>\n"
+    text += f"• Множитель наград: <b>x{mult:.1f}</b>"
+    return text
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -141,7 +204,7 @@ def load_data():
     global admins_db, rarities_db, units_db, unit_id_counter, user_inventory, user_equipped
     global mobs_db, mob_id_counter, currencies_db, maps_db, map_id_counter
     global user_balances, crates_db, crate_id_counter, user_free_crate_times, bot_settings
-    global units_exist_stats
+    global units_exist_stats, user_profiles
     
     init_db()
     data = db_get("full_state", {})
@@ -169,13 +232,17 @@ def load_data():
         
         maps_db = data.get("maps_db", {})
         for m_id, m_data in maps_db.items():
-            if "rewards" in m_data and "💎 Гемы" in m_data["rewards"]:
-                del m_data["rewards"]["💎 Гемы"]
+            if "rewards" in m_data:
+                m_data["win_coins"] = m_data["rewards"].get("💰 Монеты", 100)
+                del m_data["rewards"]
+            if "win_coins" not in m_data: m_data["win_coins"] = 100
+            if "lose_coins" not in m_data: m_data["lose_coins"] = 10
                 
         map_id_counter = data.get("map_id_counter", 1)
         crates_db = data.get("crates_db", {})
         crate_id_counter = data.get("crate_id_counter", 1)
         
+        user_profiles = data.get("user_profiles", {})
         user_equipped = {str(k): list(v) for k, v in data.get("user_equipped", {}).items()}
         
         user_balances = data.get("user_balances", {})
@@ -228,6 +295,7 @@ def save_data():
         "user_inventory": user_inventory,
         "user_equipped": {str(k): list(v) for k, v in user_equipped.items()},
         "user_balances": user_balances,
+        "user_profiles": user_profiles,
         "user_free_crate_times": user_free_crate_times,
         "bot_settings": bot_settings,
         "units_exist_stats": units_exist_stats
@@ -368,7 +436,8 @@ class AdminMapAdd(StatesGroup):
     wave_builder = State()
     waiting_mob_count = State()
     waiting_wave_turns = State()
-    waiting_reward_coins = State()
+    waiting_win_coins = State()
+    waiting_lose_coins = State()
 
 class AdminRarityAdd(StatesGroup):
     waiting_for_name = State()
@@ -507,9 +576,10 @@ def extract_user_identifier(message: Message) -> str | None:
     return None
 
 def init_user_balance(user_id_str: str):
+    if user_id_str not in user_profiles:
+        user_profiles[user_id_str] = {"level": 1, "exp": 0}
     if user_id_str not in user_balances:
         user_balances[user_id_str] = {"💰 Монеты": 100}
-        
         sid = bot_settings.get("starter_unit_id")
         if sid and str(sid) in units_db:
             if user_id_str not in user_inventory:
@@ -525,6 +595,13 @@ def init_user_balance(user_id_str: str):
 
 def get_welcome_text(user_id_str: str, user_name: str) -> str:
     bal = user_balances.get(user_id_str, {"💰 Монеты": 100})
+    prof = user_profiles.get(user_id_str, {"level": 1, "exp": 0})
+    lvl = prof["level"]
+    exp = prof["exp"]
+    title = get_title(lvl)
+    
+    req = get_exp_req(lvl) if lvl < 50 else "MAX"
+    exp_str = f"{exp} / {req}" if lvl < 50 else "MAX"
     
     bal_text = ""
     for cur in currencies_db:
@@ -539,8 +616,15 @@ def get_welcome_text(user_id_str: str, user_name: str) -> str:
     unlocked_count = len(unlocked_base)
     total_units = len(units_db)
     
+    bonuses_txt = get_bonuses_text(lvl)
+    
     return (
         f"👑 <b>ПРОФИЛЬ ИГРОКА: {user_name}</b> 👑\n"
+        f"🔰 <b>Уровень: {lvl} ({title})</b>\n"
+        f"📊 Опыт: <b>{exp_str}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🌟 <b>ВАШИ БОНУСЫ УРОВНЯ:</b>\n"
+        f"{bonuses_txt}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"💳 <b>Ваши финансы:</b>\n"
         f"{bal_text}"
@@ -609,6 +693,8 @@ def get_inventory_page(user_id_str: str, page: int):
 def get_equip_page(user_id_str: str, page: int):
     equipped = user_equipped.get(user_id_str, [])
     inv = user_inventory.get(user_id_str, {})
+    prof = user_profiles.get(user_id_str, {"level": 1})
+    max_slots, _, _, _, _, _ = get_bonuses_data(prof["level"])
     
     equipped = [item for item in equipped if item.split(":")[0] in units_db and item in inv]
     if len(equipped) != len(user_equipped.get(user_id_str, [])):
@@ -629,7 +715,7 @@ def get_equip_page(user_id_str: str, page: int):
     start_idx = (page - 1) * ITEMS_PER_PAGE
     page_items = all_items[start_idx:start_idx + ITEMS_PER_PAGE]
     
-    text = f"⚔️ <b>ЭКИПИРОВКА ({len(equipped)}/5)</b>\n━━━━━━━━━━━━━━━━━━\n"
+    text = f"⚔️ <b>ЭКИПИРОВКА ({len(equipped)}/{max_slots})</b>\n━━━━━━━━━━━━━━━━━━\n"
     if not equipped:
         text += "<i>В колоде никого нет.</i>\n\n"
     else:
@@ -743,7 +829,7 @@ def _draw_battle_image_sync(img_bytes, total_mobs_hp, current_wave, waves_total,
         return out_bio.getvalue()
     except Exception: return None
 
-def get_main_battle_kb(battle_id: str) -> InlineKeyboardMarkup:
+def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarkup:
     battle = active_battles[battle_id]
     mode = battle.get("ui_mode", "deploy")
     buttons = []
@@ -757,6 +843,8 @@ def get_main_battle_kb(battle_id: str) -> InlineKeyboardMarkup:
     mode_text = "🔄 В меню Улучшений" if mode == "deploy" else "🔄 В меню Размещения"
     buttons.append([InlineKeyboardButton(text=mode_text, callback_data=f"b_switch_mode_{battle_id}")])
     
+    # Calculate discount for specific user to display correctly IF they click it, 
+    # but the message is shared. So we show base cost on button, apply discount internally.
     if mode == "deploy":
         pool = {}
         for p_uid, p in battle["players"].items():
@@ -769,8 +857,8 @@ def get_main_battle_kb(battle_id: str) -> InlineKeyboardMarkup:
             is_shiny = (is_shiny_str == "1")
             u = get_unit_stats(uid, is_shiny)
             if u:
-                cost = u.get("deploy_cost", 50)
-                row.append(InlineKeyboardButton(text=f"🔸 {u.get('name')} | 💰{cost}", callback_data=f"b_dep_{battle_id}_{uid}_{is_shiny_str}"))
+                base_cost = u.get("deploy_cost", 50)
+                row.append(InlineKeyboardButton(text=f"🔸 {u.get('name')} | 💰{base_cost}", callback_data=f"b_dep_{battle_id}_{uid}_{is_shiny_str}"))
                 if len(row) == 2:
                     buttons.append(row)
                     row = []
@@ -795,9 +883,9 @@ def get_main_battle_kb(battle_id: str) -> InlineKeyboardMarkup:
             if not u: continue
             
             b_u = units_db.get(uid, {})
-            cost = b_u.get("upgrades", {}).get(str(nxt_lvl), {}).get("cost", 9999)
+            base_cost = b_u.get("upgrades", {}).get(str(nxt_lvl), {}).get("cost", 9999)
             
-            btn_text = f"⬆️ Улучшить {u.get('name')} (Ур.{nxt_lvl}) | 💰{cost}"
+            btn_text = f"⬆️ Улучшить {u.get('name')} (Ур.{nxt_lvl}) | 💰{base_cost}"
             row.append(InlineKeyboardButton(text=btn_text, callback_data=f"b_upg_{battle_id}_{uid}_{is_shiny_str}_{lvl}"))
             if len(row) == 1:
                 buttons.append(row)
@@ -856,7 +944,7 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
     if living_mobs > 5: text += f"<i>...и еще {living_mobs - 5} шт.</i>\n"
         
     text += "=====================\n"
-    text += f"🏰 <b>ВАША БАЗА</b>\n❤️ Прочность: <b>{battle['base_hp']}/100</b>\n\n"
+    text += f"🏰 <b>ВАША БАЗА</b>\n❤️ Прочность: <b>{battle['base_hp']}</b>\n\n"
     text += "👥 <b>Игроки:</b>\n"
     for uid, p in battle["players"].items():
         disp_coins = int(p['coins']) if p['coins'] == int(p['coins']) else round(p['coins'], 1)
@@ -887,6 +975,7 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
             if "Замедление" in types: stats_list.append(f"❄️ Зам.")
             if "Оглушение" in types: stats_list.append(f"⚡ Стан")
             if "Горение" in types: stats_list.append(f"🔥 Огонь")
+            if "Гений" in types: stats_list.append(f"🧠 Гений")
             text += f"• {u.get('name')} (x{count}) | {' | '.join(stats_list)}\n"
             
     if total_deployed == 0: text += "<i>Поле боя пустует</i>\n"
@@ -931,12 +1020,13 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
             has_upgrades = True
             
         if has_upgrades: text += upg_text
+        text += "\n<i>* Уровневые скидки применяются автоматически при покупке.</i>\n"
         
     text += "=====================\n"
     if not photo_file or isinstance(photo_file, str):
         text += f"⏱ <b>Ход: {battle['current_turn']} / {wave_info['turns']}</b> (След. ход через {timer_delay}с)"
     
-    return photo_file, text, get_main_battle_kb(battle_id)
+    return photo_file, text, get_main_battle_kb(battle_id, battle["host_id"])
 
 # ==========================================
 # ОСНОВНАЯ ЛОГИКА И РОУТЕРЫ
@@ -964,7 +1054,7 @@ async def cmd_give_all_starter(m: Message, state: FSMContext):
         count += 1
         
     save_data()
-    await m.answer(f"✅ Начальный юнит «{units_db[str(sid)]['name']}» успешно выдан всем галереево-зарегистрированным {count} игрокам в базе!")
+    await m.answer(f"✅ Начальный юнит «{units_db[str(sid)]['name']}» успешно выдан всем зарегистрированным {count} игрокам в базе!")
 
 @dp.message(StateFilter('*'), Command("panel"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_panel(message: Message, state: FSMContext):
@@ -1071,7 +1161,12 @@ async def cq_crate_info(callback: CallbackQuery, state: FSMContext):
     else:
         text += "<i>В этом крейте нет юнитов!</i>\n"
     
-    text += "\n✨ <i>Любой выпавший юнит имеет 5% шанс стать Шайни!</i>\n━━━━━━━━━━━━━━━━━━\nСколько крейтов открыть?"
+    prof = user_profiles.get(str(callback.from_user.id), {"level": 1})
+    _, shiny_chance, disc, _, _, _ = get_bonuses_data(prof["level"])
+    
+    text += f"\n✨ <i>Шанс на Шайни: {int(shiny_chance*100)}% (Бонус уровня)</i>\n"
+    if disc > 0: text += f"🏷 <i>Скидка {int(disc*100)}% в бою на всех юнитов из-за вашего уровня!</i>\n"
+    text += "━━━━━━━━━━━━━━━━━━\nСколько крейтов открыть?"
     
     kb = [[InlineKeyboardButton(text="Откр. 1", callback_data=f"crate_open_{cid}_1"), InlineKeyboardButton(text="Откр. 5", callback_data=f"crate_open_{cid}_5")],
           [InlineKeyboardButton(text="Откр. 10", callback_data=f"crate_open_{cid}_10"), InlineKeyboardButton(text="Откр. 50", callback_data=f"crate_open_{cid}_50")],
@@ -1113,8 +1208,11 @@ async def cq_crate_open(callback: CallbackQuery, state: FSMContext):
     counts = {}
     if user_id_str not in user_inventory: user_inventory[user_id_str] = {}
     
+    prof = user_profiles.get(user_id_str, {"level": 1})
+    _, shiny_chance, _, _, _, _ = get_bonuses_data(prof["level"])
+    
     for uid in results:
-        is_shiny = 1 if random.random() <= 0.05 else 0
+        is_shiny = 1 if random.random() <= shiny_chance else 0
         item_str = f"{uid}:{is_shiny}"
         counts[item_str] = counts.get(item_str, 0) + 1
         user_inventory[user_id_str][item_str] = user_inventory[user_id_str].get(item_str, 0) + 1
@@ -1182,9 +1280,12 @@ async def cq_eq_toggle(callback: CallbackQuery, state: FSMContext):
     user_id_str = str(callback.from_user.id)
     equipped = user_equipped.get(user_id_str, [])
     
+    prof = user_profiles.get(user_id_str, {"level": 1})
+    max_slots, _, _, _, _, _ = get_bonuses_data(prof["level"])
+    
     if item_str in equipped: equipped.remove(item_str)
     else:
-        if len(equipped) >= 5: return await callback.answer("⚠️ В колоде может быть максимум 5 юнитов!", show_alert=True)
+        if len(equipped) >= max_slots: return await callback.answer(f"⚠️ В колоде может быть максимум {max_slots} юнитов!", show_alert=True)
         equipped.append(item_str)
         
     user_equipped[user_id_str] = equipped
@@ -1242,14 +1343,18 @@ async def lobby_create(callback: CallbackQuery):
     
     m_data = maps_db[mid]
     
+    prof = user_profiles.get(user_id_str, {"level": 1})
+    _, _, _, start_c, _, _ = get_bonuses_data(prof["level"])
+    p_coins = m_data.get("starting_coins", 100) + start_c
+    
     active_battles[bid] = {
         "map_id": mid,
         "chat_id": callback.message.chat.id,
         "host_id": callback.from_user.id,
         "players": {
-            user_id_str: {"name": callback.from_user.first_name, "coins": m_data.get("starting_coins", 100), "deployed": [], "damage_dealt": 0.0, "mobs_killed": 0, "coins_earned": 0.0}
+            user_id_str: {"name": callback.from_user.first_name, "coins": p_coins, "deployed": [], "damage_dealt": 0.0, "mobs_killed": 0, "coins_earned": 0.0}
         },
-        "base_hp": 100,
+        "base_hp": 100 + prof["level"] - 1,
         "current_wave": 1,
         "current_turn": 1,
         "mobs": [],
@@ -1284,7 +1389,11 @@ async def lobby_join(callback: CallbackQuery):
     if len(battle["players"]) >= 4: return await callback.answer("Лобби заполнено (макс 4)!", show_alert=True)
     
     m_data = maps_db[battle["map_id"]]
-    battle["players"][user_id_str] = {"name": callback.from_user.first_name, "coins": m_data.get("starting_coins", 100), "deployed": [], "damage_dealt": 0.0, "mobs_killed": 0, "coins_earned": 0.0}
+    prof = user_profiles.get(user_id_str, {"level": 1})
+    _, _, _, start_c, _, _ = get_bonuses_data(prof["level"])
+    p_coins = m_data.get("starting_coins", 100) + start_c
+    
+    battle["players"][user_id_str] = {"name": callback.from_user.first_name, "coins": p_coins, "deployed": [], "damage_dealt": 0.0, "mobs_killed": 0, "coins_earned": 0.0}
     user_to_battle[user_id_str] = bid
     
     try: await callback.message.edit_text(get_lobby_text(bid), reply_markup=callback.message.reply_markup)
@@ -1305,15 +1414,22 @@ async def lobby_start_match(callback: CallbackQuery):
     m_data = maps_db[battle["map_id"]]
     w_info = m_data["waves"][0]
     
+    p_count = len(battle["players"])
+    hp_mult = 1.0
+    if p_count == 2: hp_mult = 1.5
+    elif p_count == 3: hp_mult = 2.25
+    elif p_count == 4: hp_mult = 3.0
+    
     battle["mobs"] = []
     for m_entry in w_info.get("mobs", []):
         mob = mobs_db.get(str(m_entry["id"]), {"name": "Моб", "hp": 100, "defense_percent": 0, "trait": "Обычный"})
+        scaled_hp = int(mob["hp"] * hp_mult)
         for _ in range(m_entry.get("count", 1)):
             battle["mobs"].append({
                 "id": m_entry["id"],
                 "name": mob.get("name", "Моб"),
-                "hp": mob["hp"],
-                "max_hp": mob["hp"],
+                "hp": scaled_hp,
+                "max_hp": scaled_hp,
                 "def": mob.get("defense_percent", 0),
                 "trait": mob.get("trait", "Обычный"),
                 "stun_duration": 0,
@@ -1479,6 +1595,12 @@ async def process_battle_turn(battle_id: str, bot: Bot):
     for m in battle["mobs"]:
         if m.get("stun_duration", 0) > 0: m["stun_duration"] -= 1
 
+    p_count = len(battle["players"])
+    hp_mult = 1.0
+    if p_count == 2: hp_mult = 1.5
+    elif p_count == 3: hp_mult = 2.25
+    elif p_count == 4: hp_mult = 3.0
+
     if not battle["mobs"]:
         for p_uid, p_data in battle["players"].items():
             wave_income = sum(get_battle_stats(dep["uid"], dep.get("is_shiny", False), dep.get("level", 1)).get("income", 0) for dep in p_data["deployed"] if get_battle_stats(dep["uid"], dep.get("is_shiny", False), dep.get("level", 1)) and "Ферма" in get_battle_stats(dep["uid"], dep.get("is_shiny", False), dep.get("level", 1)).get("unit_types", []))
@@ -1494,8 +1616,9 @@ async def process_battle_turn(battle_id: str, bot: Bot):
         battle["mobs"] = []
         for m_entry in w_info.get("mobs", []):
             mob = mobs_db.get(str(m_entry["id"]), {"name": "Моб", "hp": 100, "defense_percent": 0, "trait": "Обычный"})
+            scaled_hp = int(mob["hp"] * hp_mult)
             for _ in range(m_entry.get("count", 1)):
-                battle["mobs"].append({"id": m_entry["id"], "name": mob.get("name", "Моб"), "hp": mob["hp"], "max_hp": mob["hp"], "def": mob.get("defense_percent", 0), "trait": mob.get("trait", "Обычный"), "stun_duration": 0, "burn_duration": 0})
+                battle["mobs"].append({"id": m_entry["id"], "name": mob.get("name", "Моб"), "hp": scaled_hp, "max_hp": scaled_hp, "def": mob.get("defense_percent", 0), "trait": mob.get("trait", "Обычный"), "stun_duration": 0, "burn_duration": 0})
     else:
         battle["current_turn"] += 1
         if battle["current_turn"] > w_info["turns"]:
@@ -1518,8 +1641,9 @@ async def process_battle_turn(battle_id: str, bot: Bot):
             battle["mobs"] = []
             for m_entry in w_info.get("mobs", []):
                 mob = mobs_db.get(str(m_entry["id"]), {"name": "Моб", "hp": 100, "defense_percent": 0, "trait": "Обычный"})
+                scaled_hp = int(mob["hp"] * hp_mult)
                 for _ in range(m_entry.get("count", 1)):
-                    battle["mobs"].append({"id": m_entry["id"], "name": mob.get("name", "Моб"), "hp": mob["hp"], "max_hp": mob["hp"], "def": mob.get("defense_percent", 0), "trait": mob.get("trait", "Обычный"), "stun_duration": 0, "burn_duration": 0})
+                    battle["mobs"].append({"id": m_entry["id"], "name": mob.get("name", "Моб"), "hp": scaled_hp, "max_hp": scaled_hp, "def": mob.get("defense_percent", 0), "trait": mob.get("trait", "Обычный"), "stun_duration": 0, "burn_duration": 0})
 
     await update_main_battle_message(battle_id, bot)
 
@@ -1527,20 +1651,37 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
     battle = active_battles[battle_id]
     chat_id = battle["chat_id"]
     m_data = maps_db[battle["map_id"]]
-    rew = m_data.get("rewards", {})
     
-    text = "❇️❇️❇️ <b>ПОБЕДА В БОЮ!</b> ❇️❇️❇️\n\nНаграды:\n" if is_win else "📛📛📛 <b>ПОРАЖЕНИЕ (БАЗА УНИЧТОЖЕНА)</b> 📛📛📛\n\nУтешительный приз:\n"
-    for k, v in rew.items():
-        amt = v if is_win else max(1, int(v * 0.1))
-        text += f"+{amt} {k}\n"
-        for p_uid in battle["players"].keys():
-            bal = user_balances.get(p_uid, {"💰 Монеты": 100})
-            bal[k] = bal.get(k, 0) + amt
-            user_balances[p_uid] = bal
+    text = "❇️❇️❇️ <b>ПОБЕДА В БОЮ!</b> ❇️❇️❇️\n\n" if is_win else "📛📛📛 <b>ПОРАЖЕНИЕ (БАЗА УНИЧТОЖЕНА)</b> 📛📛📛\n\n"
+    
+    mvp_id = max(battle["players"], key=lambda k: battle["players"][k]["damage_dealt"], default=None)
+    
+    base_exp = 100 if is_win else battle["current_wave"] * 2
+    base_coins = m_data.get("win_coins", 100) if is_win else m_data.get("lose_coins", 10)
+    
+    for p_uid, p in battle["players"].items():
+        prof = user_profiles.get(p_uid, {"level": 1, "exp": 0})
+        _, _, _, _, mult, _ = get_bonuses_data(prof["level"])
+        
+        coins_earned = int(base_coins * mult)
+        exp_earned = int(base_exp * 1.2) if p_uid == mvp_id else base_exp
+        
+        bal = user_balances.get(p_uid, {"💰 Монеты": 100})
+        bal["💰 Монеты"] = bal.get("💰 Монеты", 0) + coins_earned
+        user_balances[p_uid] = bal
+        
+        leveled_up = add_exp(p_uid, exp_earned)
+        lvl = user_profiles[p_uid]["level"]
+        
+        mvp_tag = " 👑 MVP!" if p_uid == mvp_id else ""
+        lvl_tag = f" ⬆️ НОВЫЙ УРОВЕНЬ ({lvl})!" if leveled_up else ""
+        
+        text += f"• <b>{p['name']}</b>{mvp_tag}\n"
+        text += f"   └ 💰 +{coins_earned} (Множитель x{mult:.1f})\n"
+        text += f"   └ 💠 +{exp_earned} EXP{lvl_tag}\n\n"
             
-    text += "\n📊 <b>СТАТИСТИКА МАТЧА (MVP):</b>\n"
+    text += "📊 <b>СТАТИСТИКА МАТЧА:</b>\n"
     players = list(battle["players"].values())
-    
     if players:
         top_dmg = max(players, key=lambda x: x["damage_dealt"])
         top_kills = max(players, key=lambda x: x["mobs_killed"])
@@ -1586,14 +1727,17 @@ async def battle_deploy(callback: CallbackQuery):
     if user_id_str not in battle["players"]: return await callback.answer("Вы не в этом бою!", show_alert=True)
     
     p = battle["players"][user_id_str]
+    prof = user_profiles.get(user_id_str, {"level": 1})
+    _, _, disc, _, _, sup = get_bonuses_data(prof["level"])
+    
     is_shiny = (is_shiny_str == "1")
     unit = get_unit_stats(uid, is_shiny)
     if not unit: return await callback.answer("Юнит не найден!", show_alert=True)
     
-    cost = unit.get("deploy_cost", 50)
+    cost = max(1, int(unit.get("deploy_cost", 50) * (1.0 - disc)))
     if p["coins"] < cost: return await callback.answer(f"Не хватает монет! Нужно: {cost}", show_alert=True)
     
-    limit = unit.get("supply_limit", 99)
+    limit = unit.get("supply_limit", 99) + sup
     deployed_count = sum(1 for d in p["deployed"] if d["uid"] == uid and d.get("is_shiny") == is_shiny)
     if deployed_count >= limit: return await callback.answer("Лимит юнитов этого типа достигнут!", show_alert=True)
     
@@ -1615,6 +1759,9 @@ async def battle_do_upgrade(callback: CallbackQuery):
     p = battle["players"].get(user_id_str)
     if not p: return await callback.answer("Вы не в этом бою!", show_alert=True)
     
+    prof = user_profiles.get(user_id_str, {"level": 1})
+    _, _, disc, _, _, _ = get_bonuses_data(prof["level"])
+    
     is_shiny = (is_shiny_str == "1")
     
     target_dep = None
@@ -1627,7 +1774,8 @@ async def battle_do_upgrade(callback: CallbackQuery):
         return await callback.answer("Ваш юнит для улучшения не найден!", show_alert=True)
         
     b_u = units_db.get(uid, {})
-    cost = b_u.get("upgrades", {}).get(str(nxt_lvl), {}).get("cost", 9999)
+    base_cost = b_u.get("upgrades", {}).get(str(nxt_lvl), {}).get("cost", 9999)
+    cost = max(1, int(base_cost * (1.0 - disc)))
     
     if p["coins"] < cost:
         return await callback.answer(f"Не хватает монет! Нужно: {cost}", show_alert=True)
@@ -2124,12 +2272,19 @@ async def mapb_wave_turns(m: Message, state: FSMContext):
 
 @dp.callback_query(AdminMapAdd.wave_builder, F.data == "mapb_finish")
 async def mapb_finish(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminMapAdd.waiting_reward_coins)
-    await cb.message.edit_text("💰 Введите награду за победу (Количество Монет):")
+    await state.set_state(AdminMapAdd.waiting_win_coins)
+    await cb.message.edit_text("💰 Введите награду за ПОБЕДУ (Количество Монет):")
     await cb.answer()
 
-@dp.message(AdminMapAdd.waiting_reward_coins)
-async def map_reward_coins(m: Message, state: FSMContext):
+@dp.message(AdminMapAdd.waiting_win_coins)
+async def map_reward_win(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("Введите число.")
+    await state.update_data(win_coins=int(m.text))
+    await state.set_state(AdminMapAdd.waiting_lose_coins)
+    await m.answer("📉 Введите награду за ПОРАЖЕНИЕ (Количество Монет):")
+
+@dp.message(AdminMapAdd.waiting_lose_coins)
+async def map_reward_lose(m: Message, state: FSMContext):
     if not m.text.isdigit(): return await m.answer("Введите число.")
     data = await state.get_data()
     global map_id_counter
@@ -2140,7 +2295,8 @@ async def map_reward_coins(m: Message, state: FSMContext):
         "starting_coins": 100,
         "waves_total": len(data["waves"]),
         "waves": data["waves"],
-        "rewards": {"💰 Монеты": int(m.text)}
+        "win_coins": data["win_coins"],
+        "lose_coins": int(m.text)
     }
     map_id_counter += 1
     save_data()
@@ -2281,12 +2437,13 @@ async def render_edit_unit_menu(m_or_cb, uid: str):
     
     kb.append([
         InlineKeyboardButton(text=f"Название ({u.get('name')})", callback_data=f"set_u_{uid}_name"),
-        InlineKeyboardButton(text=f"Цель ({u.get('target_type', 'Наземный')})", callback_data=f"set_u_{uid}_target_type")
+        InlineKeyboardButton(text=f"Редкость ({u.get('rarity')})", callback_data=f"set_u_{uid}_rarity")
     ])
     kb.append([
         InlineKeyboardButton(text=f"Цена ({u.get('deploy_cost', '-')})", callback_data=f"set_u_{uid}_deploy_cost"),
         InlineKeyboardButton(text=f"Лимит ({u.get('supply_limit', '-')})", callback_data=f"set_u_{uid}_supply_limit")
     ])
+    kb.append([InlineKeyboardButton(text=f"Цель ({u.get('target_type', 'Наземный')})", callback_data=f"set_u_{uid}_target_type")])
     kb.append([InlineKeyboardButton(text=f"🏷 Изменить Классы ({len(u.get('unit_types', []))})", callback_data=f"editucl_{uid}")])
     
     utypes = u.get("unit_types", [])
@@ -2648,6 +2805,7 @@ async def edit_mob_menu(cb: CallbackQuery):
     text = f"✏️ <b>Редактирование Моба: {m.get('name')}</b>\nВыберите параметр:\n"
     kb = [
         [InlineKeyboardButton(text=f"Название ({m.get('name')})", callback_data=f"set_m_{mid}_name")],
+        [InlineKeyboardButton(text=f"Тип ({m.get('trait', 'Обычный')})", callback_data=f"set_m_{mid}_trait")],
         [InlineKeyboardButton(text=f"Здоровье ({m.get('hp')})", callback_data=f"set_m_{mid}_hp")],
         [InlineKeyboardButton(text=f"Броня % ({m.get('defense_percent')})", callback_data=f"set_m_{mid}_defense_percent")],
         [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_edit_mob_list")]
@@ -2670,6 +2828,8 @@ async def edit_map_menu(cb: CallbackQuery, state: FSMContext):
     text = f"✏️ <b>Карта: {m.get('name')}</b>\nВнимание: Редактировать волны нужно через перезапись."
     kb = [
         [InlineKeyboardButton(text="🔄 Перезаписать Волны", callback_data=f"remap_{mid}")],
+        [InlineKeyboardButton(text=f"Победа ({m.get('win_coins', 100)} 💰)", callback_data=f"set_map_{mid}_win_coins")],
+        [InlineKeyboardButton(text=f"Поражение ({m.get('lose_coins', 10)} 💰)", callback_data=f"set_map_{mid}_lose_coins")],
         [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_edit_map_list")]
     ]
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -2699,7 +2859,7 @@ async def edit_crate_menu(cb: CallbackQuery):
     kb = [
         [InlineKeyboardButton(text=f"Название ({c.get('name')})", callback_data=f"set_c_{cid}_name")],
         [InlineKeyboardButton(text=f"Цена ({c.get('price')})", callback_data=f"set_c_{cid}_price")],
-        [InlineKeyboardButton(text="🔄 Изменить содержимое (перезапись)", callback_data=f"recrate_{cid}")],
+        [InlineKeyboardButton(text="🔄 Изменить текущее содержимое", callback_data=f"recrate_{cid}")],
         [InlineKeyboardButton(text="🏷 Настроить Баннеры (Ротация)", callback_data=f"cr_bans_{cid}")],
         [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_edit_crate_list")]
     ]
@@ -2856,6 +3016,16 @@ async def generic_edit_trigger(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         return
         
+    elif e_type == "m" and field == "trait":
+        kb = [[InlineKeyboardButton(text=t, callback_data=f"setmtrait_{e_id}_{t}")] for t in MOB_TRAITS]
+        await cb.message.edit_text("🧬 Выберите новый тип моба:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        return await cb.answer()
+        
+    elif e_type == "u" and field == "rarity":
+        kb = [[InlineKeyboardButton(text=r, callback_data=f"seturar_{e_id}_{r}")] for r in rarities_db]
+        await cb.message.edit_text("💎 Выберите новую редкость юнита:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        return await cb.answer()
+        
     await state.set_state(AdminEditGeneric.waiting_for_value)
     await state.update_data(e_type=e_type, e_id=e_id, field=field)
     
@@ -2870,6 +3040,26 @@ async def generic_edit_target_type(cb: CallbackQuery, state: FSMContext):
         units_db[uid]["target_type"] = new_target
         save_data()
     await send_main_screen(cb.message, f"✅ Цель юнита успешно изменена на <b>{new_target}</b>!")
+    await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("setmtrait_"))
+async def generic_edit_mob_trait(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split("_", 2)
+    mid, new_trait = parts[1], parts[2]
+    if mid in mobs_db:
+        mobs_db[mid]["trait"] = new_trait
+        save_data()
+    await send_main_screen(cb.message, f"✅ Тип моба успешно изменен на <b>{new_trait}</b>!")
+    await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("seturar_"))
+async def generic_edit_unit_rarity(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split("_", 2)
+    uid, new_rar = parts[1], parts[2]
+    if uid in units_db:
+        units_db[uid]["rarity"] = new_rar
+        save_data()
+    await send_main_screen(cb.message, f"✅ Редкость юнита успешно изменена на <b>{new_rar}</b>!")
     await cb.answer()
 
 @dp.message(AdminEditGeneric.waiting_for_value)
@@ -2896,6 +3086,8 @@ async def generic_edit_receive(m: Message, state: FSMContext):
         if field == "units": 
             crates_db[e_id]["banners"] = [{"units": val}]
             crates_db[e_id]["current_banner_index"] = 0
+    elif e_type == "map" and e_id in maps_db:
+        maps_db[e_id][field] = val
         
     save_data()
     await state.clear()
