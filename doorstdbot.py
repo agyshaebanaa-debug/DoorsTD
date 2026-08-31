@@ -1,15 +1,6 @@
 import sys
 import subprocess
 import os
-import asyncio
-import logging
-import json
-import random
-import time
-import io
-import csv
-import urllib.request
-import sqlite3
 
 def install_missing_packages():
     packages_to_install = []
@@ -29,6 +20,15 @@ def install_missing_packages():
 
 install_missing_packages()
 
+import asyncio
+import logging
+import json
+import random
+import time
+import io
+import csv
+import urllib.request
+import sqlite3
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.types import (
     Message, 
@@ -84,7 +84,7 @@ mob_id_counter = 1
 user_inventory = {}  
 user_equipped = {}   
 user_balances = {} 
-user_profiles = {} # Уровни и опыт
+user_profiles = {} 
 user_free_crate_times = {} 
 currencies_db = ["💰 Монеты"] 
 maps_db = {}       
@@ -237,9 +237,13 @@ def load_data():
                 del m_data["rewards"]
             if "win_coins" not in m_data: m_data["win_coins"] = 100
             if "lose_coins" not in m_data: m_data["lose_coins"] = 10
+            if "reward_currency" not in m_data: m_data["reward_currency"] = "💰 Монеты"
                 
         map_id_counter = data.get("map_id_counter", 1)
         crates_db = data.get("crates_db", {})
+        for c_id, c_data in crates_db.items():
+            if "currency" not in c_data: c_data["currency"] = "💰 Монеты"
+        
         crate_id_counter = data.get("crate_id_counter", 1)
         
         user_profiles = data.get("user_profiles", {})
@@ -436,8 +440,13 @@ class AdminMapAdd(StatesGroup):
     wave_builder = State()
     waiting_mob_count = State()
     waiting_wave_turns = State()
+    reward_currency = State()
     waiting_win_coins = State()
     waiting_lose_coins = State()
+
+class AdminMapEditWave(StatesGroup):
+    waiting_mob_count = State()
+    waiting_turns = State()
 
 class AdminRarityAdd(StatesGroup):
     waiting_for_name = State()
@@ -474,6 +483,7 @@ class AdminMobAdd(StatesGroup):
 
 class AdminCrateAdd(StatesGroup):
     name = State()
+    currency = State()
     price = State()
     photo = State()
     unit_builder = State()
@@ -843,8 +853,6 @@ def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarku
     mode_text = "🔄 В меню Улучшений" if mode == "deploy" else "🔄 В меню Размещения"
     buttons.append([InlineKeyboardButton(text=mode_text, callback_data=f"b_switch_mode_{battle_id}")])
     
-    # Calculate discount for specific user to display correctly IF they click it, 
-    # but the message is shared. So we show base cost on button, apply discount internally.
     if mode == "deploy":
         pool = {}
         for p_uid, p in battle["players"].items():
@@ -980,7 +988,6 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
             
     if total_deployed == 0: text += "<i>Поле боя пустует</i>\n"
     
-    # БЛОК С ДИФФАМИ УЛУЧШЕНИЙ
     if battle.get("ui_mode") == "upgrade":
         upg_text = "\n⬆️ <b>ДОСТУПНЫЕ УЛУЧШЕНИЯ:</b>\n"
         has_upgrades = False
@@ -1063,7 +1070,6 @@ async def cmd_panel(message: Message, state: FSMContext):
     msg = await message.answer(get_welcome_text(str(message.from_user.id), message.from_user.first_name), reply_markup=get_main_menu_kb(message.chat.type))
     panel_owners[f"{msg.chat.id}_{msg.message_id}"] = message.from_user.id
 
-# ЗАПРОС ПОДТВЕРЖДЕНИЯ ВЫХОДА ИЗ КАТКИ
 @dp.message(StateFilter('*'), F.text.in_({"🔙 Назад", "🔙Назад🔙", "🔙 В Главное Меню"}))
 async def global_back_button(message: Message, state: FSMContext):
     user_id_str = str(message.from_user.id)
@@ -1309,20 +1315,6 @@ async def cq_main_index(callback: CallbackQuery, state: FSMContext):
         msg = await callback.message.answer(text, reply_markup=kb)
         if callback.message.chat.type in {"group", "supergroup"}: panel_owners[f"{msg.chat.id}_{msg.message_id}"] = callback.from_user.id
     await callback.answer()
-
-
-# ==========================================
-# СОЗДАНИЕ КАТОК И ДВИЖОК БОЯ
-# ==========================================
-def get_lobby_text(bid: str) -> str:
-    battle = active_battles[bid]
-    m_data = maps_db[battle["map_id"]]
-    text = f"⚔️ <b>Лобби создано!</b>\nКарта: {m_data.get('name')}\n"
-    text += f"\n👥 <b>Игроки ({len(battle['players'])}/4):</b>\n"
-    for uid, p in battle["players"].items():
-        text += f"• {p['name']}\n"
-    text += "\nИгроки могут нажать «Присоединиться», а хост — «Начать»."
-    return text
 
 @dp.callback_query(StateFilter('*'), F.data == "battle_select_map")
 async def lobby_select_map(callback: CallbackQuery):
@@ -1658,6 +1650,7 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
     
     base_exp = 100 if is_win else battle["current_wave"] * 2
     base_coins = m_data.get("win_coins", 100) if is_win else m_data.get("lose_coins", 10)
+    rew_cur = m_data.get("reward_currency", "💰 Монеты")
     
     for p_uid, p in battle["players"].items():
         prof = user_profiles.get(p_uid, {"level": 1, "exp": 0})
@@ -1667,7 +1660,7 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
         exp_earned = int(base_exp * 1.2) if p_uid == mvp_id else base_exp
         
         bal = user_balances.get(p_uid, {"💰 Монеты": 100})
-        bal["💰 Монеты"] = bal.get("💰 Монеты", 0) + coins_earned
+        bal[rew_cur] = bal.get(rew_cur, 0) + coins_earned
         user_balances[p_uid] = bal
         
         leveled_up = add_exp(p_uid, exp_earned)
@@ -1677,7 +1670,7 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
         lvl_tag = f" ⬆️ НОВЫЙ УРОВЕНЬ ({lvl})!" if leveled_up else ""
         
         text += f"• <b>{p['name']}</b>{mvp_tag}\n"
-        text += f"   └ 💰 +{coins_earned} (Множитель x{mult:.1f})\n"
+        text += f"   └ +{coins_earned} {rew_cur} (Множитель x{mult:.1f})\n"
         text += f"   └ 💠 +{exp_earned} EXP{lvl_tag}\n\n"
             
     text += "📊 <b>СТАТИСТИКА МАТЧА:</b>\n"
@@ -1689,7 +1682,7 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
         
         text += f"💥 Больше всех урона: <b>{top_dmg['name']}</b> ({round(top_dmg['damage_dealt'], 1)})\n"
         text += f"💀 Больше всех убийств: <b>{top_kills['name']}</b> ({top_kills['mobs_killed']} шт.)\n"
-        text += f"💰 Самый богатый: <b>{top_coins['name']}</b> ({round(top_coins['coins_earned'], 1)} монет)\n"
+        text += f"💰 Больше всего фарма: <b>{top_coins['name']}</b> ({round(top_coins['coins_earned'], 1)} монет)\n"
             
     save_data()
     await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
@@ -2272,16 +2265,27 @@ async def mapb_wave_turns(m: Message, state: FSMContext):
 
 @dp.callback_query(AdminMapAdd.wave_builder, F.data == "mapb_finish")
 async def mapb_finish(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminMapAdd.reward_currency)
+    kb = [[InlineKeyboardButton(text=c, callback_data=f"mapadd_cur_{idx}")] for idx, c in enumerate(currencies_db)]
+    await cb.message.edit_text("💰 Выберите ВАЛЮТУ для наград за победу/поражение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+@dp.callback_query(AdminMapAdd.reward_currency, F.data.startswith("mapadd_cur_"))
+async def map_reward_cur(cb: CallbackQuery, state: FSMContext):
+    idx = int(cb.data.split("_")[2])
+    cur = currencies_db[idx]
+    await state.update_data(reward_currency=cur)
     await state.set_state(AdminMapAdd.waiting_win_coins)
-    await cb.message.edit_text("💰 Введите награду за ПОБЕДУ (Количество Монет):")
+    await cb.message.edit_text(f"💰 Введите награду за ПОБЕДУ (Количество {cur}):")
     await cb.answer()
 
 @dp.message(AdminMapAdd.waiting_win_coins)
 async def map_reward_win(m: Message, state: FSMContext):
     if not m.text.isdigit(): return await m.answer("Введите число.")
     await state.update_data(win_coins=int(m.text))
+    data = await state.get_data()
     await state.set_state(AdminMapAdd.waiting_lose_coins)
-    await m.answer("📉 Введите награду за ПОРАЖЕНИЕ (Количество Монет):")
+    await m.answer(f"📉 Введите награду за ПОРАЖЕНИЕ (Количество {data.get('reward_currency')}):")
 
 @dp.message(AdminMapAdd.waiting_lose_coins)
 async def map_reward_lose(m: Message, state: FSMContext):
@@ -2295,6 +2299,7 @@ async def map_reward_lose(m: Message, state: FSMContext):
         "starting_coins": 100,
         "waves_total": len(data["waves"]),
         "waves": data["waves"],
+        "reward_currency": data["reward_currency"],
         "win_coins": data["win_coins"],
         "lose_coins": int(m.text)
     }
@@ -2330,8 +2335,17 @@ async def admin_add_crate(cb: CallbackQuery, state: FSMContext):
 @dp.message(AdminCrateAdd.name)
 async def admin_crate_name(m: Message, state: FSMContext):
     await state.update_data(name=m.text)
+    await state.set_state(AdminCrateAdd.currency)
+    kb = [[InlineKeyboardButton(text=c, callback_data=f"cradd_cur_{idx}")] for idx, c in enumerate(currencies_db)]
+    await m.answer("🪙 Выберите ВАЛЮТУ для покупки этого крейта:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(AdminCrateAdd.currency, F.data.startswith("cradd_cur_"))
+async def admin_crate_cur(cb: CallbackQuery, state: FSMContext):
+    cur = currencies_db[int(cb.data.split("_")[2])]
+    await state.update_data(currency=cur)
     await state.set_state(AdminCrateAdd.price)
-    await m.answer("💰 Введите цену крейта (в монетах):")
+    await cb.message.edit_text(f"💰 Введите ЦЕНУ крейта (в {cur}):")
+    await cb.answer()
 
 @dp.message(AdminCrateAdd.price)
 async def admin_crate_price(m: Message, state: FSMContext):
@@ -2399,7 +2413,7 @@ async def crb_finish(cb: CallbackQuery, state: FSMContext):
     crates_db[cid] = {
         "name": data["name"],
         "price": data["price"],
-        "currency": "💰 Монеты",
+        "currency": data["currency"],
         "units": data["units"],
         "photo": data.get("photo"),
         "banners": [{"units": data["units"]}],
@@ -2825,11 +2839,13 @@ async def edit_map_menu(cb: CallbackQuery, state: FSMContext):
     m = maps_db.get(mid)
     if not m: return await cb.answer("Карта не найдена!", show_alert=True)
     
-    text = f"✏️ <b>Карта: {m.get('name')}</b>\nВнимание: Редактировать волны нужно через перезапись."
+    text = f"✏️ <b>Карта: {m.get('name')}</b>"
     kb = [
-        [InlineKeyboardButton(text="🔄 Перезаписать Волны", callback_data=f"remap_{mid}")],
-        [InlineKeyboardButton(text=f"Победа ({m.get('win_coins', 100)} 💰)", callback_data=f"set_map_{mid}_win_coins")],
-        [InlineKeyboardButton(text=f"Поражение ({m.get('lose_coins', 10)} 💰)", callback_data=f"set_map_{mid}_lose_coins")],
+        [InlineKeyboardButton(text="🌊 Редактировать Волны (Точечно)", callback_data=f"map_ew_list_{mid}")],
+        [InlineKeyboardButton(text="🔄 Перезаписать ВСЕ Волны", callback_data=f"remap_{mid}")],
+        [InlineKeyboardButton(text=f"Валюта наград: {m.get('reward_currency', '💰 Монеты')}", callback_data=f"set_mapcur_{mid}")],
+        [InlineKeyboardButton(text=f"Победа ({m.get('win_coins', 100)})", callback_data=f"set_map_{mid}_win_coins")],
+        [InlineKeyboardButton(text=f"Поражение ({m.get('lose_coins', 10)})", callback_data=f"set_map_{mid}_lose_coins")],
         [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_edit_map_list")]
     ]
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -2841,6 +2857,156 @@ async def edit_map_waves_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminMapAdd.wave_builder)
     await state.update_data(name=m_data['name'], photo=m_data.get('photo'), waves=[], current_mobs=[], editing_map_id=mid)
     await show_wave_builder(cb, state)
+
+# --- ТОЧЕЧНЫЙ РЕДАКТОР ВОЛН ---
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_list_"))
+async def ew_list(cb: CallbackQuery):
+    mid = cb.data.split("_")[3]
+    m = maps_db.get(mid)
+    if not m: return await cb.answer("Карта не найдена!", show_alert=True)
+    waves = m.get("waves", [])
+    text = f"🌊 <b>Волны карты: {m['name']}</b>\nВсего волн: {len(waves)}\nВыберите волну для редактирования:"
+    kb = []
+    row = []
+    for i, w in enumerate(waves):
+        row.append(InlineKeyboardButton(text=f"Волна {i+1}", callback_data=f"map_ew_sel_{mid}_{i}"))
+        if len(row) == 3:
+            kb.append(row)
+            row = []
+    if row: kb.append(row)
+    kb.append([InlineKeyboardButton(text="➕ Добавить новую волну в конец", callback_data=f"map_ew_addw_{mid}")])
+    kb.append([InlineKeyboardButton(text="🔙 К настройкам карты", callback_data=f"ed_map_{mid}")])
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_sel_"))
+async def ew_sel(cb: CallbackQuery):
+    _, _, _, mid, widx_str = cb.data.split("_")
+    widx = int(widx_str)
+    m = maps_db.get(mid)
+    if not m or widx >= len(m.get("waves", [])): return await cb.answer("Волна не найдена!", show_alert=True)
+    w = m["waves"][widx]
+    
+    text = f"🌊 <b>Настройка: Волна {widx+1} (Карта {m['name']})</b>\n⏱ Длительность: {w['turns']} ходов\n\n👾 <b>Мобы:</b>\n"
+    if not w.get("mobs"): text += " └ <i>Нет мобов</i>\n"
+    else:
+        for m_entry in w["mobs"]:
+            mob = mobs_db.get(str(m_entry["id"]), {})
+            text += f" ├ {mob.get('name', 'Моб')} (x{m_entry['count']})\n"
+            
+    kb = [
+        [InlineKeyboardButton(text="⏱ Изменить кол-во ходов", callback_data=f"map_ew_cturn_{mid}_{widx}")],
+        [InlineKeyboardButton(text="➕ Добавить моба", callback_data=f"map_ew_amob_{mid}_{widx}")],
+        [InlineKeyboardButton(text="➖ Очистить мобов", callback_data=f"map_ew_clear_{mid}_{widx}")],
+        [InlineKeyboardButton(text="🗑 Удалить эту волну", callback_data=f"map_ew_delw_{mid}_{widx}")],
+        [InlineKeyboardButton(text="🔙 К списку волн", callback_data=f"map_ew_list_{mid}")]
+    ]
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_addw_"))
+async def ew_addw(cb: CallbackQuery):
+    mid = cb.data.split("_")[3]
+    maps_db[mid]["waves"].append({"turns": 10, "mobs": []})
+    maps_db[mid]["waves_total"] = len(maps_db[mid]["waves"])
+    save_data()
+    cb.data = f"map_ew_list_{mid}"
+    await ew_list(cb)
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_delw_"))
+async def ew_delw(cb: CallbackQuery):
+    _, _, _, mid, widx = cb.data.split("_")
+    widx = int(widx)
+    if len(maps_db[mid]["waves"]) <= 1:
+        return await cb.answer("Нельзя удалить последнюю волну!", show_alert=True)
+    maps_db[mid]["waves"].pop(widx)
+    maps_db[mid]["waves_total"] = len(maps_db[mid]["waves"])
+    save_data()
+    cb.data = f"map_ew_list_{mid}"
+    await ew_list(cb)
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_clear_"))
+async def ew_clear(cb: CallbackQuery):
+    _, _, _, mid, widx = cb.data.split("_")
+    maps_db[mid]["waves"][int(widx)]["mobs"] = []
+    save_data()
+    cb.data = f"map_ew_sel_{mid}_{widx}"
+    await ew_sel(cb)
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_amob_"))
+async def ew_amob(cb: CallbackQuery):
+    _, _, _, mid, widx = cb.data.split("_")
+    kb = []
+    row = []
+    for mob_id, mob in mobs_db.items():
+        row.append(InlineKeyboardButton(text=mob.get("name", f"Моб {mob_id}"), callback_data=f"map_ew_smob_{mid}_{widx}_{mob_id}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row: kb.append(row)
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"map_ew_sel_{mid}_{widx}")])
+    await cb.message.edit_text("Выберите моба для добавления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_smob_"))
+async def ew_smob(cb: CallbackQuery, state: FSMContext):
+    _, _, _, mid, widx, mobid = cb.data.split("_")
+    await state.set_state(AdminMapEditWave.waiting_mob_count)
+    await state.update_data(mid=mid, widx=int(widx), mobid=mobid)
+    await cb.message.edit_text("🔢 Введите количество этих мобов для добавления в волну:")
+    await cb.answer()
+
+@dp.message(AdminMapEditWave.waiting_mob_count)
+async def ew_mob_count(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("Введите число.")
+    data = await state.get_data()
+    mid, widx, mobid = data["mid"], data["widx"], data["mobid"]
+    
+    maps_db[mid]["waves"][widx]["mobs"].append({"id": mobid, "count": int(m.text)})
+    save_data()
+    await state.clear()
+    
+    await m.answer(f"✅ Моб добавлен в волну {widx+1}!")
+    await show_wave_editor_msg(m, mid, widx)
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("map_ew_cturn_"))
+async def ew_cturn(cb: CallbackQuery, state: FSMContext):
+    _, _, _, mid, widx = cb.data.split("_")
+    await state.set_state(AdminMapEditWave.waiting_turns)
+    await state.update_data(mid=mid, widx=int(widx))
+    await cb.message.edit_text("⏱ Введите новую длительность волны (в ходах):")
+    await cb.answer()
+
+@dp.message(AdminMapEditWave.waiting_turns)
+async def ew_turns(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("Введите число.")
+    data = await state.get_data()
+    mid, widx = data["mid"], data["widx"]
+    
+    maps_db[mid]["waves"][widx]["turns"] = int(m.text)
+    save_data()
+    await state.clear()
+    
+    await m.answer(f"✅ Длительность волны {widx+1} изменена!")
+    await show_wave_editor_msg(m, mid, widx)
+
+async def show_wave_editor_msg(target: Message, mid: str, widx: int):
+    m = maps_db.get(mid)
+    w = m["waves"][widx]
+    text = f"🌊 <b>Настройка: Волна {widx+1} (Карта {m['name']})</b>\n⏱ Длительность: {w['turns']} ходов\n\n👾 <b>Мобы:</b>\n"
+    if not w.get("mobs"): text += " └ <i>Нет мобов</i>\n"
+    else:
+        for m_entry in w["mobs"]:
+            mob = mobs_db.get(str(m_entry["id"]), {})
+            text += f" ├ {mob.get('name', 'Моб')} (x{m_entry['count']})\n"
+    kb = [
+        [InlineKeyboardButton(text="⏱ Изменить кол-во ходов", callback_data=f"map_ew_cturn_{mid}_{widx}")],
+        [InlineKeyboardButton(text="➕ Добавить моба", callback_data=f"map_ew_amob_{mid}_{widx}")],
+        [InlineKeyboardButton(text="➖ Очистить мобов", callback_data=f"map_ew_clear_{mid}_{widx}")],
+        [InlineKeyboardButton(text="🗑 Удалить эту волну", callback_data=f"map_ew_delw_{mid}_{widx}")],
+        [InlineKeyboardButton(text="🔙 К списку волн", callback_data=f"map_ew_list_{mid}")]
+    ]
+    await target.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(StateFilter('*'), F.data == "admin_edit_crate_list")
 async def edit_crate_list(cb: CallbackQuery):
@@ -2858,6 +3024,7 @@ async def edit_crate_menu(cb: CallbackQuery):
     text = f"✏️ <b>Крейт: {c.get('name')}</b>\n"
     kb = [
         [InlineKeyboardButton(text=f"Название ({c.get('name')})", callback_data=f"set_c_{cid}_name")],
+        [InlineKeyboardButton(text=f"Валюта ({c.get('currency', '💰 Монеты')})", callback_data=f"set_cratecur_{cid}")],
         [InlineKeyboardButton(text=f"Цена ({c.get('price')})", callback_data=f"set_c_{cid}_price")],
         [InlineKeyboardButton(text="🔄 Изменить текущее содержимое", callback_data=f"recrate_{cid}")],
         [InlineKeyboardButton(text="🏷 Настроить Баннеры (Ротация)", callback_data=f"cr_bans_{cid}")],
@@ -2870,7 +3037,7 @@ async def edit_crate_units_start(cb: CallbackQuery, state: FSMContext):
     cid = cb.data.split("_")[1]
     c_data = crates_db.get(cid)
     await state.set_state(AdminCrateAdd.unit_builder)
-    await state.update_data(name=c_data['name'], price=c_data['price'], photo=c_data.get('photo'), units={}, editing_crate_id=cid)
+    await state.update_data(name=c_data['name'], price=c_data['price'], currency=c_data.get('currency', '💰 Монеты'), photo=c_data.get('photo'), units={}, editing_crate_id=cid)
     await show_crate_builder(cb, state)
 
 # --- НАСТРОЙКА БАННЕРОВ ДЛЯ КРЕЙТА ---
@@ -3026,11 +3193,39 @@ async def generic_edit_trigger(cb: CallbackQuery, state: FSMContext):
         await cb.message.edit_text("💎 Выберите новую редкость юнита:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
         return await cb.answer()
         
+    elif e_type == "mapcur":
+        kb = [[InlineKeyboardButton(text=c, callback_data=f"smapcur_{e_id}_{idx}")] for idx, c in enumerate(currencies_db)]
+        await cb.message.edit_text("Выберите новую валюту наград карты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        return await cb.answer()
+        
+    elif e_type == "cratecur":
+        kb = [[InlineKeyboardButton(text=c, callback_data=f"scratecur_{e_id}_{idx}")] for idx, c in enumerate(currencies_db)]
+        await cb.message.edit_text("Выберите новую валюту для крейта:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        return await cb.answer()
+        
     await state.set_state(AdminEditGeneric.waiting_for_value)
     await state.update_data(e_type=e_type, e_id=e_id, field=field)
     
     await cb.message.edit_text(f"✏️ Введите новое значение для поля <b>{field}</b>:\n<i>(Для отмены напишите /cancel)</i>")
     await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("smapcur_"))
+async def a_set_mapcur_do(cb: CallbackQuery, state: FSMContext):
+    mid, idx = cb.data.split("_")[1], int(cb.data.split("_")[2])
+    maps_db[mid]["reward_currency"] = currencies_db[idx]
+    save_data()
+    await cb.answer("Валюта карты изменена!")
+    cb.data = f"ed_map_{mid}"
+    await edit_map_menu(cb, state)
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("scratecur_"))
+async def a_set_cratecur_do(cb: CallbackQuery):
+    cid, idx = cb.data.split("_")[1], int(cb.data.split("_")[2])
+    crates_db[cid]["currency"] = currencies_db[idx]
+    save_data()
+    await cb.answer("Валюта крейта изменена!")
+    cb.data = f"ed_c_{cid}"
+    await edit_crate_menu(cb)
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("setutarg_"))
 async def generic_edit_target_type(cb: CallbackQuery, state: FSMContext):
