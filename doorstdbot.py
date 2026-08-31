@@ -1302,19 +1302,19 @@ async def cq_eq_toggle(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("idx_p_"))
 async def cq_main_index(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    page = int(callback.data.split("_")[2])
-    
-    if not units_db: return await callback.answer("Энциклопедия пуста.", show_alert=True)
-            
-    text, kb = get_index_page(str(callback.from_user.id), page)
-    try: await callback.message.edit_text(text, reply_markup=kb)
-    except:
-        try: await callback.message.delete()
-        except: pass
-        msg = await callback.message.answer(text, reply_markup=kb)
-        if callback.message.chat.type in {"group", "supergroup"}: panel_owners[f"{msg.chat.id}_{msg.message_id}"] = callback.from_user.id
-    await callback.answer()
+@dp.callback_query(StateFilter('*'), F.data == "idx_p_1")
+async def cq_main_index_fallback(callback: CallbackQuery, state: FSMContext):
+    await cq_main_index(callback, state)
+
+def get_lobby_text(bid: str) -> str:
+    battle = active_battles[bid]
+    m_data = maps_db[battle["map_id"]]
+    text = f"⚔️ <b>Лобби создано!</b>\nКарта: {m_data.get('name')}\n"
+    text += f"\n👥 <b>Игроки ({len(battle['players'])}/4):</b>\n"
+    for uid, p in battle["players"].items():
+        text += f"• {p['name']}\n"
+    text += "\nИгроки могут нажать «Присоединиться», а хост — «Начать»."
+    return text
 
 @dp.callback_query(StateFilter('*'), F.data == "battle_select_map")
 async def lobby_select_map(callback: CallbackQuery):
