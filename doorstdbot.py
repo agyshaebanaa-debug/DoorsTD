@@ -1302,9 +1302,17 @@ async def cq_eq_toggle(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("idx_p_"))
 async def cq_main_index(callback: CallbackQuery, state: FSMContext):
-@dp.callback_query(StateFilter('*'), F.data == "idx_p_1")
-async def cq_main_index_fallback(callback: CallbackQuery, state: FSMContext):
-    await cq_main_index(callback, state)
+    await state.clear()
+    page = int(callback.data.split("_")[2])
+    
+    text, kb = get_index_page(str(callback.from_user.id), page)
+    try: await callback.message.edit_text(text, reply_markup=kb)
+    except:
+        try: await callback.message.delete()
+        except: pass
+        msg = await callback.message.answer(text, reply_markup=kb)
+        if callback.message.chat.type in {"group", "supergroup"}: panel_owners[f"{msg.chat.id}_{msg.message_id}"] = callback.from_user.id
+    await callback.answer()
 
 def get_lobby_text(bid: str) -> str:
     battle = active_battles[bid]
