@@ -3048,7 +3048,6 @@ async def edit_crate_units_start(cb: CallbackQuery, state: FSMContext):
     await state.update_data(name=c_data['name'], price=c_data['price'], currency=c_data.get('currency', '💰 Монеты'), photo=c_data.get('photo'), units={}, editing_crate_id=cid)
     await show_crate_builder(cb, state)
 
-# --- НАСТРОЙКА БАННЕРОВ ДЛЯ КРЕЙТА ---
 async def render_crate_banners_menu(m_or_cb, state: FSMContext, cid: str):
     c = crates_db.get(cid)
     if not c: return
@@ -3179,7 +3178,6 @@ async def cr_ban_ret(cb: CallbackQuery, state: FSMContext):
     await render_crate_banners_menu(cb, state, cid)
     await cb.answer()
 
-# ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК УСТАНОВКИ ЗНАЧЕНИЙ
 @dp.callback_query(StateFilter('*'), F.data.startswith("set_"))
 async def generic_edit_trigger(cb: CallbackQuery, state: FSMContext):
     parts = cb.data.split("_", 3)
@@ -3223,7 +3221,6 @@ async def a_set_mapcur_do(cb: CallbackQuery, state: FSMContext):
     maps_db[mid]["reward_currency"] = currencies_db[idx]
     save_data()
     await cb.answer("Валюта карты изменена!")
-    cb.data = f"ed_map_{mid}"
     await edit_map_menu(cb, state)
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("scratecur_"))
@@ -3232,7 +3229,6 @@ async def a_set_cratecur_do(cb: CallbackQuery):
     crates_db[cid]["currency"] = currencies_db[idx]
     save_data()
     await cb.answer("Валюта крейта изменена!")
-    cb.data = f"ed_c_{cid}"
     await edit_crate_menu(cb)
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("setutarg_"))
@@ -3296,7 +3292,6 @@ async def generic_edit_receive(m: Message, state: FSMContext):
     await state.clear()
     await send_main_screen(m, f"✅ Значение успешно изменено на {val}!")
 
-# --- ЭКСПОРТ/ИМПОРТ CSV (РЕДАКТОР В ТАБЛИЦАХ) ---
 @dp.callback_query(StateFilter('*'), F.data == "admin_export_csv")
 async def admin_export_csv(cb: CallbackQuery):
     if not units_db and not mobs_db:
@@ -3349,9 +3344,6 @@ async def admin_import_csv(m: Message):
     save_data()
     await m.answer(f"✅ База данных успешно обновлена из таблицы! Изменено объектов: <b>{success_count}</b>")
 
-# ==========================================
-# ОСТАЛЬНЫЕ КОМАНДЫ И НАСТРОЙКИ
-# ==========================================
 @dp.callback_query(StateFilter('*'), F.data == "admin_give_cur")
 async def cq_admin_give_cur(cb: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -3426,7 +3418,6 @@ async def a_del_cur_act(cb: CallbackQuery, state: FSMContext):
         await cb.answer(f"Удалено: {c}", show_alert=True)
     await cq_admin_panel(cb, state)
 
-# --- ДОБАВЛЕНИЕ И УДАЛЕНИЕ РЕДКОСТИ ---
 @dp.callback_query(StateFilter('*'), F.data == "admin_add_rarity")
 async def a_add_rarity(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminRarityAdd.waiting_for_name)
@@ -3577,9 +3568,6 @@ async def admin_restore_auto(m: Message):
     except Exception as e:
         await m.answer(f"❌ Ошибка восстановления: {e}")
 
-# ==========================================
-# УНИВЕРСАЛЬНЫЙ ПЕРЕХВАТЧИК
-# ==========================================
 async def safe_exit_and_menu(m: Message, state: FSMContext, alert_text=None):
     await state.clear()
     init_user_balance(str(m.from_user.id))
@@ -3594,7 +3582,6 @@ async def handle_any_text(m: Message, state: FSMContext):
     if m.chat.type in {"group", "supergroup"}: return
     await safe_exit_and_menu(m, state)
 
-# --- АВТО БЭКАП И РОТАЦИЯ КРЕЙТОВ ---
 async def hourly_backup_task(bot: Bot):
     while True:
         await asyncio.sleep(3600) 
@@ -3625,9 +3612,6 @@ async def hourly_crate_rotation_task(bot: Bot):
         except Exception as e:
             logging.error(f"Ошибка ротации крейтов: {e}")
 
-# ==========================================
-# ЗАПУСК БОТА
-# ==========================================
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     load_data() 
