@@ -137,7 +137,7 @@ ACHIEVEMENTS_DB = {
     "win_rooms_easy": {"name": "Detour", "desc": "Пройти карту «The Rooms (🟢EASY)»", "c": 300, "k": 30, "exp": 300},
     "win_rooms_hard": {"name": "A-1000 Walker", "desc": "Пройти карту «The Rooms (🔴HARD)»", "c": 800, "k": 100, "exp": 700},
     "kill_a90": {"name": "A-90's Nightmare", "desc": "Уничтожить A-90 без замедления", "c": 350, "k": 30, "exp": 300},
-    "low_hp_win": {"name": "Close Call", "desc": "Победить, когда у базы < 10 HP", "c": 200, "k": 15, "exp": 200},
+    "low_hp_win": {"name": "Close Call", "desc": "Победить, когда у базы менее 10 HP", "c": 200, "k": 15, "exp": 200},
     "flawless_win": {"name": "Flawless Escape", "desc": "Пройти карту со 100% HP базы", "c": 300, "k": 25, "exp": 300},
     "first_crate": {"name": "One of Many", "desc": "Открыть свой первый крейт в магазине", "c": 50, "k": 0, "exp": 50},
     "use_crucifix": {"name": "Unstoppable Force", "desc": "Активировать Крест и сжечь полную волну", "c": 150, "k": 15, "exp": 150},
@@ -497,7 +497,7 @@ class PanelMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if isinstance(event, CallbackQuery) and event.message:
             if event.message.chat.type in {"group", "supergroup"}:
-                public_cb = ["el_", "b_dep_", "b_switch_mode_", "b_upg_", "b_toggle_", "b_surr_", "lobby_", "inv_", "idx_", "eq_"]
+                public_cb = ["el_", "b_dep_", "b_switch_mode_", "b_upg_", "b_toggle_", "b_surr_", "lobby_", "inv_", "idx_", "eq_", "ach_", "jeff_", "buy_item_"]
                 if not any(event.data.startswith(p) for p in public_cb):
                     key = f"{event.message.chat.id}_{event.message.message_id}"
                     if key in panel_owners and panel_owners[key] != event.from_user.id:
@@ -2099,17 +2099,13 @@ async def battle_use_flashlight(callback: CallbackQuery):
 # ==========================================
 @dp.callback_query(StateFilter('*'), F.data == "jeff_closed")
 async def cq_jeff_closed(cb: CallbackQuery):
-    text = (
-        "🚪 <b>Лавка Джеффа сейчас закрыта!</b>\n\n"
-        "Джефф приходит в отель по расписанию (МСК):\n"
-        "• <b>07:00</b>\n"
-        "• <b>13:00</b>\n"
-        "• <b>17:00</b>\n"
-        "• <b>20:00</b>\n"
-        "• <b>23:00</b>\n\n"
-        "<i>Каждый визит длится ровно 45 минут.</i>"
+    alert_text = (
+        "🚪 Лавка Джеффа сейчас закрыта!\n\n"
+        "Расписание визитов (МСК):\n"
+        "07:00, 13:00, 17:00, 20:00, 23:00\n\n"
+        "Каждый визит длится 45 минут."
     )
-    await cb.answer(text, show_alert=True)
+    await cb.answer(alert_text, show_alert=True)
 
 @dp.callback_query(StateFilter('*'), F.data == "jeff_shop")
 async def cq_jeff_shop(cb: CallbackQuery):
@@ -2198,7 +2194,11 @@ async def cq_buy_item(cb: CallbackQuery):
 @dp.callback_query(StateFilter('*'), F.data.startswith("ach_p_"))
 async def cq_achievements_page(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    page = int(callback.data.split("_")[2])
+    try:
+        page = int(callback.data.split("_")[2])
+    except (IndexError, ValueError):
+        page = 1
+        
     uid = str(callback.from_user.id)
     unlocked = user_achievements.get(uid, [])
 
@@ -2209,7 +2209,8 @@ async def cq_achievements_page(callback: CallbackQuery, state: FSMContext):
     
     current_batch = all_ids[(page-1)*per_page : page*per_page]
 
-    text = f"🏆 <b>ДОСТИЖЕНИЯ ({len(unlocked)} / {len(all_ids)})</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+    text = f"🏆 <b>ДОСТИЖЕНИЯ (Стр. {page}/{total_pages})</b>\n"
+    text += f"📊 Открыто: <b>{len(unlocked)} из {len(all_ids)}</b>\n━━━━━━━━━━━━━━━━━━\n\n"
     for aid in current_batch:
         ach = ACHIEVEMENTS_DB[aid]
         if aid in unlocked:
@@ -2226,7 +2227,17 @@ async def cq_achievements_page(callback: CallbackQuery, state: FSMContext):
     if nav: kb.append(nav)
     kb.append([InlineKeyboardButton(text="🔙 В главное меню", callback_data="back_to_main_menu")])
 
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    rm = InlineKeyboardMarkup(inline_keyboard=kb)
+    try:
+        await callback.message.edit_text(text, reply_markup=rm)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        msg = await callback.message.answer(text, reply_markup=rm)
+        if callback.message.chat.type in {"group", "supergroup"}:
+            panel_owners[f"{msg.chat.id}_{msg.message_id}"] = callback.from_user.id
     await callback.answer()
 
 # ==========================================
