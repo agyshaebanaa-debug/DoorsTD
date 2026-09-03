@@ -497,7 +497,7 @@ class PanelMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if isinstance(event, CallbackQuery) and event.message:
             if event.message.chat.type in {"group", "supergroup"}:
-                public_cb = ["el_", "b_dep_", "b_switch_mode_", "b_upg_", "b_toggle_", "b_surr_", "lobby_", "inv_", "idx_", "eq_", "ach_", "jeff_", "buy_item_"]
+                public_cb = ["el_", "b_", "lobby_", "inv_", "idx_", "eq_", "ach_", "jeff_", "buy_item_"]
                 if not any(event.data.startswith(p) for p in public_cb):
                     key = f"{event.message.chat.id}_{event.message.message_id}"
                     if key in panel_owners and panel_owners[key] != event.from_user.id:
@@ -933,7 +933,8 @@ def _draw_battle_image_sync(img_bytes, total_mobs_hp, current_wave, waves_total,
 
 def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarkup:
     battle = active_battles[battle_id]
-    mode = battle.get("ui_mode", "deploy")
+    mode_map = {"upg": "upgrade", "upgrade": "upgrade", "dep": "deploy", "deploy": "deploy", "items": "items"}
+    mode = mode_map.get(battle.get("ui_mode", "deploy"), "deploy")
     buttons = []
     
     skip_status = "🟢 Вкл" if battle["auto_skip"] else "🔴 Выкл"
@@ -944,18 +945,18 @@ def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarku
     
     if mode == "deploy":
         buttons.append([
-            InlineKeyboardButton(text="🔄 В меню Улучшений", callback_data=f"b_mode_upg_{battle_id}"),
+            InlineKeyboardButton(text="⬆️ Меню Улучшений", callback_data=f"b_mode_upgrade_{battle_id}"),
             InlineKeyboardButton(text="🎒 Предметы Джеффа", callback_data=f"b_mode_items_{battle_id}")
         ])
     elif mode == "upgrade":
         buttons.append([
-            InlineKeyboardButton(text="🔄 В меню Размещения", callback_data=f"b_mode_dep_{battle_id}"),
+            InlineKeyboardButton(text="🛡 Меню Размещения", callback_data=f"b_mode_deploy_{battle_id}"),
             InlineKeyboardButton(text="🎒 Предметы Джеффа", callback_data=f"b_mode_items_{battle_id}")
         ])
     elif mode == "items":
         buttons.append([
-            InlineKeyboardButton(text="🔄 В меню Размещения", callback_data=f"b_mode_dep_{battle_id}"),
-            InlineKeyboardButton(text="🔄 В меню Улучшений", callback_data=f"b_mode_upg_{battle_id}")
+            InlineKeyboardButton(text="🛡 Меню Размещения", callback_data=f"b_mode_deploy_{battle_id}"),
+            InlineKeyboardButton(text="⬆️ Меню Улучшений", callback_data=f"b_mode_upgrade_{battle_id}")
         ])
     
     if mode == "deploy":
@@ -998,7 +999,7 @@ def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarku
             b_u = units_db.get(uid, {})
             base_cost = b_u.get("upgrades", {}).get(str(nxt_lvl), {}).get("cost", 9999)
             
-            btn_text = f"⬆️ Улучшить {u.get('name')} (Ур.{nxt_lvl}) | 💰{base_cost}"
+            btn_text = f"⬆️ {u.get('name')} (Ур.{nxt_lvl}) | 💰{base_cost}"
             row.append(InlineKeyboardButton(text=btn_text, callback_data=f"b_upg_{battle_id}_{uid}_{is_shiny_str}_{lvl}"))
             if len(row) == 1:
                 buttons.append(row)
@@ -1009,15 +1010,10 @@ def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarku
             buttons.append([InlineKeyboardButton(text="Нет юнитов для улучшения", callback_data="none")])
 
     elif mode == "items":
-        u_it = user_items.get(str(view_user_id), {})
-        cr_c = u_it.get("crucifix", 0)
-        vt_c = u_it.get("vitamins", 0)
-        fl_c = u_it.get("flashlight", 0)
-        
-        buttons.append([InlineKeyboardButton(text=f"✝️ Сжечь волну (Крест: {cr_c})", callback_data=f"b_use_crucifix_{battle_id}")])
+        buttons.append([InlineKeyboardButton(text="✝️ Использовать Крест (Сжечь волну)", callback_data=f"b_use_crucifix_{battle_id}")])
         buttons.append([
-            InlineKeyboardButton(text=f"💊 Витамины (-50% КД) ({vt_c})", callback_data=f"b_use_vitamins_{battle_id}"),
-            InlineKeyboardButton(text=f"🔦 Фонарик (Камуфляж) ({fl_c})", callback_data=f"b_use_flashlight_{battle_id}")
+            InlineKeyboardButton(text="💊 Витамины (-50% КД)", callback_data=f"b_use_vitamins_{battle_id}"),
+            InlineKeyboardButton(text="🔦 Фонарик (Камуфляж)", callback_data=f"b_use_flashlight_{battle_id}")
         ])
             
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1079,37 +1075,41 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
         disp_coins = int(p['coins']) if p['coins'] == int(p['coins']) else round(p['coins'], 1)
         text += f"• {p['name']}: 💰 {disp_coins}\n"
     
-    text += "\n🛡 <b>Юниты на поле:</b>\n"
-    total_deployed = 0
-    for uid, p in battle["players"].items():
-        deployed_counts = {}
-        for dep in p["deployed"]:
-            item_str = f"{dep['uid']}_{1 if dep.get('is_shiny') else 0}_{dep.get('level', 1)}"
-            deployed_counts[item_str] = deployed_counts.get(item_str, 0) + 1
-            
-        for item_str, count in deployed_counts.items():
-            total_deployed += count
-            dep_uid, is_shiny_str, lvl_str = item_str.split("_")
-            lvl = int(lvl_str)
-            u = get_battle_stats(dep_uid, is_shiny_str == "1", lvl)
-            if not u: continue
-            
-            types = u.get("unit_types", [])
-            stats_list = [f"Ур.{lvl}"]
-            dmg_v = u.get('damage')
-            cd_v = u.get('cd')
-            if dmg_v is not None and cd_v is not None: stats_list.append(f"💥 {dmg_v}")
-            if "Саппорт" in types: stats_list.append(f"✨ Саппорт")
-            if "Ферма" in types: stats_list.append(f"🌾 Ферма")
-            if "Замедление" in types: stats_list.append(f"❄️ Зам.")
-            if "Оглушение" in types: stats_list.append(f"⚡ Стан")
-            if "Горение" in types: stats_list.append(f"🔥 Огонь")
-            if "Гений" in types: stats_list.append(f"🧠 Гений")
-            text += f"• {u.get('name')} (x{count}) | {' | '.join(stats_list)}\n"
-            
-    if total_deployed == 0: text += "<i>Поле боя пустует</i>\n"
-    
-    if battle.get("ui_mode") == "upgrade":
+    mode_map = {"upg": "upgrade", "upgrade": "upgrade", "dep": "deploy", "deploy": "deploy", "items": "items"}
+    current_mode = mode_map.get(battle.get("ui_mode", "deploy"), "deploy")
+
+    if current_mode == "deploy":
+        text += "\n🛡 <b>Юниты на поле:</b>\n"
+        total_deployed = 0
+        for uid, p in battle["players"].items():
+            deployed_counts = {}
+            for dep in p["deployed"]:
+                item_str = f"{dep['uid']}_{1 if dep.get('is_shiny') else 0}_{dep.get('level', 1)}"
+                deployed_counts[item_str] = deployed_counts.get(item_str, 0) + 1
+                
+            for item_str, count in deployed_counts.items():
+                total_deployed += count
+                dep_uid, is_shiny_str, lvl_str = item_str.split("_")
+                lvl = int(lvl_str)
+                u = get_battle_stats(dep_uid, is_shiny_str == "1", lvl)
+                if not u: continue
+                
+                types = u.get("unit_types", [])
+                stats_list = [f"Ур.{lvl}"]
+                dmg_v = u.get('damage')
+                cd_v = u.get('cd')
+                if dmg_v is not None and cd_v is not None: stats_list.append(f"💥 {dmg_v}")
+                if "Саппорт" in types: stats_list.append("✨ Саппорт")
+                if "Ферма" in types: stats_list.append("🌾 Ферма")
+                if "Замедление" in types: stats_list.append("❄️ Зам.")
+                if "Оглушение" in types: stats_list.append("⚡ Стан")
+                if "Горение" in types: stats_list.append("🔥 Огонь")
+                if "Гений" in types: stats_list.append("🧠 Гений")
+                text += f"• {u.get('name')} (x{count}) | {' | '.join(stats_list)}\n"
+                
+        if total_deployed == 0: text += "<i>Поле боя пустует</i>\n"
+
+    elif current_mode == "upgrade":
         upg_text = "\n⬆️ <b>ДОСТУПНЫЕ УЛУЧШЕНИЯ:</b>\n"
         has_upgrades = False
         upg_pool_diff = {}
@@ -1132,25 +1132,26 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
             if not cur or not nxt: continue
             
             diffs = []
-            if cur.get('damage', 0) != nxt.get('damage', 0): diffs.append(f"Урон: {cur.get('damage',0)} ➡️ {nxt.get('damage',0)}")
-            if cur.get('cd', 0) != nxt.get('cd', 0): diffs.append(f"КД: {cur.get('cd',0)}с ➡️ {nxt.get('cd',0)}с")
-            if cur.get('slow_percent', 0) != nxt.get('slow_percent', 0): diffs.append(f"Зам. %: {cur.get('slow_percent',0)} ➡️ {nxt.get('slow_percent',0)}")
-            if cur.get('slow_cd', 0) != nxt.get('slow_cd', 0): diffs.append(f"КД зам.: {cur.get('slow_cd',0)}с ➡️ {nxt.get('slow_cd',0)}с")
-            if cur.get('slow_duration', 0) != nxt.get('slow_duration', 0): diffs.append(f"Длит. зам.: {cur.get('slow_duration',0)}с ➡️ {nxt.get('slow_duration',0)}с")
-            if cur.get('stun_chance', 0) != nxt.get('stun_chance', 0): diffs.append(f"Стан %: {cur.get('stun_chance',0)} ➡️ {nxt.get('stun_chance',0)}")
-            if cur.get('burn_damage', 0) != nxt.get('burn_damage', 0): diffs.append(f"Урон огня: {cur.get('burn_damage',0)} ➡️ {nxt.get('burn_damage',0)}")
-            if cur.get('income', 0) != nxt.get('income', 0): diffs.append(f"Доход: {cur.get('income',0)} ➡️ {nxt.get('income',0)}")
+            if cur.get('damage', 0) != nxt.get('damage', 0): diffs.append(f"💥 {cur.get('damage',0)} ➡️ {nxt.get('damage',0)}")
+            if cur.get('cd', 0) != nxt.get('cd', 0): diffs.append(f"⏱ {cur.get('cd',0)}с ➡️ {nxt.get('cd',0)}с")
+            if cur.get('income', 0) != nxt.get('income', 0): diffs.append(f"💰 +{cur.get('income',0)} ➡️ +{nxt.get('income',0)}")
+            if cur.get('slow_percent', 0) != nxt.get('slow_percent', 0): diffs.append(f"❄️ -{nxt.get('slow_percent',0)}%")
             
-            diff_str = ", ".join(diffs) if diffs else "Новые классы/Особые эффекты"
+            diff_str = ", ".join(diffs) if diffs else "Улучшение характеристик"
             b_u = units_db.get(dep_uid, {})
             cost = b_u.get("upgrades", {}).get(str(nxt_lvl), {}).get("cost", 9999)
-            upg_text += f"• <b>{cur.get('name')}</b> (Ур.{lvl} ➡️ {nxt_lvl}) | 💰 {cost}\n   └ {diff_str}\n"
+            upg_text += f"• <b>{cur.get('name')}</b> (Ур.{lvl}➡️{nxt_lvl}) | 💰{cost}\n   └ {diff_str}\n"
             has_upgrades = True
             
-        if has_upgrades: text += upg_text
-        text += "\n<i>* Уровневые скидки применяются автоматически при покупке.</i>\n"
-    elif battle.get("ui_mode") == "items":
-        text += "\n🎒 <b>МЕНЮ РАСХОДНИКОВ:</b>\nНажимайте на кнопки внизу, чтобы использовать Крест, Витамины или Фонарик прямо в бою!\n"
+        if not has_upgrades:
+            upg_text += "<i>Нет доступных улучшений для юнитов на поле.</i>\n"
+        text += upg_text
+
+    elif current_mode == "items":
+        text += "\n🎒 <b>МЕНЮ ПРЕДМЕТОВ ДЖЕФФА:</b>\n"
+        text += "• ✝️ <b>Крест</b> — сжигает всю текущую волну мобов\n"
+        text += "• 💊 <b>Витамины</b> — КД атак всех юнитов -50% на 2 хода\n"
+        text += "• 🔦 <b>Фонарик</b> — раскрывает Камуфляж на 3 хода\n"
         
     text += "=====================\n"
     if not photo_file or isinstance(photo_file, str):
@@ -1617,14 +1618,20 @@ async def update_main_battle_message(battle_id: str, bot: Bot):
     chat_id = battle["chat_id"]
     try:
         if photo_file:
-            try: await bot.edit_message_media(chat_id=chat_id, message_id=battle["main_msg_id"], media=InputMediaPhoto(media=photo_file, caption=text[:1024], parse_mode="HTML"), reply_markup=main_kb)
-            except: pass
+            try: 
+                await bot.edit_message_media(chat_id=chat_id, message_id=battle["main_msg_id"], media=InputMediaPhoto(media=photo_file, caption=text[:1024], parse_mode="HTML"), reply_markup=main_kb)
+            except Exception as e:
+                try: 
+                    await bot.edit_message_caption(chat_id=chat_id, message_id=battle["main_msg_id"], caption=text[:1024], reply_markup=main_kb, parse_mode="HTML")
+                except Exception as e2:
+                    logging.warning(f"Ошибка обновления медиа боя {battle_id}: {e} / {e2}")
         else:
-            try: await bot.edit_message_caption(chat_id=chat_id, message_id=battle["main_msg_id"], caption=text[:1024], reply_markup=main_kb, parse_mode="HTML")
-            except:
-                try: await bot.edit_message_text(chat_id=chat_id, message_id=battle["main_msg_id"], text=text[:4096], reply_markup=main_kb, parse_mode="HTML")
-                except: pass
-    except TelegramBadRequest: pass
+            try: 
+                await bot.edit_message_text(chat_id=chat_id, message_id=battle["main_msg_id"], text=text[:4096], reply_markup=main_kb, parse_mode="HTML")
+            except Exception as e:
+                logging.warning(f"Ошибка обновления текста боя {battle_id}: {e}")
+    except Exception as e:
+        logging.warning(f"Ошибка update_main_battle_message: {e}")
 
 async def process_battle_turn(battle_id: str, bot: Bot):
     if battle_id not in active_battles: return
@@ -1986,14 +1993,20 @@ async def battle_do_upgrade(callback: CallbackQuery):
             break
             
     if not target_dep:
-        return await callback.answer("Ваш юнит для улучшения не найден!", show_alert=True)
+        other_owner = any(
+            any(d["uid"] == uid and d.get("is_shiny", False) == is_shiny and d.get("level", 1) == lvl for d in other_p["deployed"])
+            for op_id, other_p in battle["players"].items() if op_id != user_id_str
+        )
+        if other_owner:
+            return await callback.answer("⚠️ Этот юнит выставлен союзником! Улучшить его может только владелец.", show_alert=True)
+        return await callback.answer("Юнит уже улучшен или не найден!", show_alert=True)
         
     b_u = units_db.get(uid, {})
     base_cost = b_u.get("upgrades", {}).get(str(nxt_lvl), {}).get("cost", 9999)
     cost = max(1, int(base_cost * (1.0 - disc)))
     
     if p["coins"] < cost:
-        return await callback.answer(f"Не хватает монет! Нужно: {cost}", show_alert=True)
+        return await callback.answer(f"Не хватает монет! Нужно: {cost} 💰", show_alert=True)
         
     p["coins"] -= cost
     target_dep["level"] = nxt_lvl
@@ -2024,10 +2037,22 @@ async def battle_surrender(callback: CallbackQuery):
 @dp.callback_query(StateFilter('*'), F.data.startswith("b_mode_"))
 async def battle_set_mode(callback: CallbackQuery):
     parts = callback.data.split("_")
-    mode, battle_id = parts[2], parts[3]
+    mode_raw, battle_id = parts[2], parts[3]
     if battle_id not in active_battles: return await callback.answer("Бой окончен!", show_alert=True)
-    active_battles[battle_id]["ui_mode"] = mode
+    
+    mode_map = {
+        "upg": "upgrade",
+        "upgrade": "upgrade",
+        "dep": "deploy",
+        "deploy": "deploy",
+        "items": "items"
+    }
+    active_battles[battle_id]["ui_mode"] = mode_map.get(mode_raw, "deploy")
     await update_main_battle_message(battle_id, callback.bot)
+    await callback.answer()
+
+@dp.callback_query(StateFilter('*'), F.data == "none")
+async def cb_none(callback: CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("b_use_crucifix_"))
