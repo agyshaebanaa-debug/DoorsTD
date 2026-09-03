@@ -29,6 +29,7 @@ import io
 import csv
 import urllib.request
 import sqlite3
+from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.types import (
     Message, 
@@ -85,6 +86,8 @@ user_inventory = {}
 user_equipped = {}   
 user_balances = {} 
 user_profiles = {} 
+user_items = {} # Предметы Джеффа: {uid: {"crucifix": 0, "vitamins": 0, "flashlight": 0, "key_charges": 0, "key_spent": 0}}
+user_achievements = {} # Достижения: {uid: ["welcome", ...]}
 user_free_crate_times = {} 
 currencies_db = ["💰 Монеты"] 
 maps_db = {}       
@@ -114,6 +117,74 @@ panel_owners = {}
 image_cache = {}
 
 # ==========================================
+# БАЗА 24 ДОСТИЖЕНИЙ (БЕЗ ТИТУЛОВ)
+# ==========================================
+ACHIEVEMENTS_DB = {
+    "welcome": {"name": "Welcome to the Hotel", "desc": "Завершить свой первый бой", "c": 50, "k": 0, "exp": 50},
+    "buddy": {"name": "Buddy System", "desc": "Пройти карту в совместном режиме (2+ игрока)", "c": 100, "k": 0, "exp": 100},
+    "kill_rush": {"name": "Out of My Way", "desc": "Убить Rush на карте The Hotel1", "c": 75, "k": 0, "exp": 75},
+    "cam_det": {"name": "I See You", "desc": "Уничтожить Камуфляж юнитом-Детектором", "c": 80, "k": 0, "exp": 80},
+    "kill_eyes": {"name": "Look at Me", "desc": "Победить моба Eyes", "c": 100, "k": 0, "exp": 100},
+    "kill_halt": {"name": "Two Steps Ahead", "desc": "Уничтожить Halt до удара по базе", "c": 150, "k": 10, "exp": 150},
+    "ambush_surv": {"name": "Rebound", "desc": "Пережить волну с Ambush без урона базе", "c": 150, "k": 0, "exp": 150},
+    "kill_shadow": {"name": "In Plain Sight", "desc": "Уничтожить замаскированного Shadow", "c": 120, "k": 0, "exp": 100},
+    "kill_timothy": {"name": "It Stole From Me", "desc": "Уничтожить Timothy на 1 волне", "c": 50, "k": 0, "exp": 50},
+    "kill_void": {"name": "Stay in the Light", "desc": "Уничтожить Void юнитом Анти-Воздух", "c": 150, "k": 15, "exp": 150},
+    "kill_glitch": {"name": "Error 404", "desc": "Победить босса Glitch", "c": 250, "k": 20, "exp": 250},
+    "win_seek": {"name": "You Can Run", "desc": "Пройти карту «Seek Run Hotel1»", "c": 250, "k": 20, "exp": 250},
+    "win_figure": {"name": "Quiet Please", "desc": "Пройти карту «Figure Library Hotel»", "c": 500, "k": 40, "exp": 400},
+    "win_hotel1": {"name": "Rock Bottom", "desc": "Зачистить все 30 волн карты «The Hotel1»", "c": 350, "k": 25, "exp": 300},
+    "win_rooms_easy": {"name": "Detour", "desc": "Пройти карту «The Rooms (🟢EASY)»", "c": 300, "k": 30, "exp": 300},
+    "win_rooms_hard": {"name": "A-1000 Walker", "desc": "Пройти карту «The Rooms (🔴HARD)»", "c": 800, "k": 100, "exp": 700},
+    "kill_a90": {"name": "A-90's Nightmare", "desc": "Уничтожить A-90 без замедления", "c": 350, "k": 30, "exp": 300},
+    "low_hp_win": {"name": "Close Call", "desc": "Победить, когда у базы < 10 HP", "c": 200, "k": 15, "exp": 200},
+    "flawless_win": {"name": "Flawless Escape", "desc": "Пройти карту со 100% HP базы", "c": 300, "k": 25, "exp": 300},
+    "first_crate": {"name": "One of Many", "desc": "Открыть свой первый крейт в магазине", "c": 50, "k": 0, "exp": 50},
+    "use_crucifix": {"name": "Unstoppable Force", "desc": "Активировать Крест и сжечь полную волну", "c": 150, "k": 15, "exp": 150},
+    "use_key": {"name": "Master Locksmith", "desc": "Потратить все 5 зарядов Скелетного ключа", "c": 250, "k": 20, "exp": 200},
+    "drop_shiny": {"name": "Golden Light", "desc": "Выбить любого Шайни-юнита из крейта", "c": 300, "k": 30, "exp": 250},
+    "banker": {"name": "Plutocrat", "desc": "Накопить более 5,000 монет в бою", "c": 400, "k": 0, "exp": 350}
+}
+
+# ==========================================
+# РАСПИСАНИЕ МАГАЗИНА ДЖЕФФА (МСК)
+# ==========================================
+JEFF_HOURS = [7, 13, 17, 20, 23]
+MSK_TZ = timezone(timedelta(hours=3))
+
+def get_jeff_status() -> tuple[bool, int]:
+    now = datetime.now(MSK_TZ)
+    if now.hour in JEFF_HOURS and now.minute < 45:
+        return True, 45 - now.minute
+    return False, 0
+
+def grant_achievement(uid: str, ach_id: str, bot: Bot = None, chat_id: int = None):
+    if ach_id not in ACHIEVEMENTS_DB: return
+    if uid not in user_achievements: user_achievements[uid] = []
+    if ach_id in user_achievements[uid]: return
+
+    user_achievements[uid].append(ach_id)
+    ach = ACHIEVEMENTS_DB[ach_id]
+
+    init_user_balance(uid)
+    if ach["c"] > 0:
+        user_balances[uid]["💰 Монеты"] = user_balances[uid].get("💰 Монеты", 0) + ach["c"]
+    if ach["k"] > 0 and "🟡Кнобсы" in currencies_db:
+        user_balances[uid]["🟡Кнобсы"] = user_balances[uid].get("🟡Кнобсы", 0) + ach["k"]
+    if ach["exp"] > 0:
+        add_exp(uid, ach["exp"])
+    save_data()
+
+    if bot and chat_id:
+        rew = f"+{ach['c']} 💰"
+        if ach["k"] > 0: rew += f" | +{ach['k']} 🟡"
+        if ach["exp"] > 0: rew += f" | +{ach['exp']} EXP"
+        asyncio.create_task(bot.send_message(
+            chat_id=chat_id,
+            text=f"🏆 <b>ДОСТИЖЕНИЕ ПОЛУЧЕНО!</b>\n🚪 <b>«{ach['name']}»</b>\n<i>{ach['desc']}</i>\n🎁 <b>Награда:</b> {rew}"
+        ))
+
+# ==========================================
 # 2. СИСТЕМА УРОВНЕЙ И БД
 # ==========================================
 def get_title(lvl):
@@ -126,7 +197,7 @@ def get_title(lvl):
 
 def get_exp_req(lvl):
     if lvl >= 50: return 999999999
-    return int(100 * (lvl ** 1.5))
+    return int(65 * (lvl ** 1.35))
 
 def add_exp(uid, amount):
     if uid not in user_profiles: user_profiles[uid] = {"level": 1, "exp": 0}
@@ -204,7 +275,7 @@ def load_data():
     global admins_db, rarities_db, units_db, unit_id_counter, user_inventory, user_equipped
     global mobs_db, mob_id_counter, currencies_db, maps_db, map_id_counter
     global user_balances, crates_db, crate_id_counter, user_free_crate_times, bot_settings
-    global units_exist_stats, user_profiles
+    global units_exist_stats, user_profiles, user_items, user_achievements
     
     init_db()
     data = db_get("full_state", {})
@@ -247,6 +318,8 @@ def load_data():
         crate_id_counter = data.get("crate_id_counter", 1)
         
         user_profiles = data.get("user_profiles", {})
+        user_items = data.get("user_items", {})
+        user_achievements = data.get("user_achievements", {})
         user_equipped = {str(k): list(v) for k, v in data.get("user_equipped", {}).items()}
         
         user_balances = data.get("user_balances", {})
@@ -300,6 +373,8 @@ def save_data():
         "user_equipped": {str(k): list(v) for k, v in user_equipped.items()},
         "user_balances": user_balances,
         "user_profiles": user_profiles,
+        "user_items": user_items,
+        "user_achievements": user_achievements,
         "user_free_crate_times": user_free_crate_times,
         "bot_settings": bot_settings,
         "units_exist_stats": units_exist_stats
@@ -309,8 +384,9 @@ def save_data():
 # ==========================================
 # 3. ЛОГИКА ЮНИТОВ И СОРТИРОВКИ
 # ==========================================
-def can_hit(unit_target: str, mob_trait: str) -> bool:
+def can_hit(unit_target: str, mob_trait: str, flashlight_active: bool = False) -> bool:
     if unit_target == "Универсал": return True
+    if flashlight_active and mob_trait == "Камуфляж": return True
     if mob_trait == "Обычный": return True
     if unit_target == "Анти-Воздух" and mob_trait == "Летающий": return True
     if unit_target == "Детектор" and mob_trait == "Камуфляж": return True
@@ -544,11 +620,20 @@ def get_main_menu_kb(chat_type: str = "private") -> InlineKeyboardMarkup:
     if maps_db: kb.append([InlineKeyboardButton(text="⚔️ ИГРАТЬ (Создать Лобби) ⚔️", callback_data="battle_select_map")])
     if crates_db: kb.append([InlineKeyboardButton(text="📦 Магазин Крейтов 📦", callback_data="crates_list")])
     
+    is_open, mins_left = get_jeff_status()
+    if is_open:
+        kb.append([InlineKeyboardButton(text=f"🛎 Лавка Джеффа (Открыта! {mins_left}м)", callback_data="jeff_shop")])
+    else:
+        kb.append([InlineKeyboardButton(text="🛎 Лавка Джеффа (Закрыто)", callback_data="jeff_closed")])
+        
     kb.append([
         InlineKeyboardButton(text="📖 Энциклопедия", callback_data="idx_p_1"), 
         InlineKeyboardButton(text="🎒 Мой Инвентарь", callback_data="inv_p_1")
     ])
-    kb.append([InlineKeyboardButton(text="⚙️ Админ панель", callback_data="admin_panel")])
+    kb.append([
+        InlineKeyboardButton(text="🏆 Достижения", callback_data="ach_p_1"),
+        InlineKeyboardButton(text="⚙️ Админ панель", callback_data="admin_panel")
+    ])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_panel_kb() -> InlineKeyboardMarkup:
@@ -677,7 +762,14 @@ def get_inventory_page(user_id_str: str, page: int):
     bal = user_balances.get(user_id_str, {"💰 Монеты": 100})
     bal_text = " | ".join([f"<b>{bal.get(c, 0)}</b> {c}" for c in currencies_db])
     
-    text = f"🎒 <b>ИНВЕНТАРЬ (Стр. {page}/{total_pages})</b>\n💳 Баланс: {bal_text}\n━━━━━━━━━━━━━━━━━━\n"
+    u_it = user_items.get(user_id_str, {})
+    k_ch = u_it.get("key_charges", 0)
+    cr_cnt = u_it.get("crucifix", 0)
+    vit_cnt = u_it.get("vitamins", 0)
+    fl_cnt = u_it.get("flashlight", 0)
+    
+    text = f"🎒 <b>ИНВЕНТАРЬ (Стр. {page}/{total_pages})</b>\n💳 Баланс: {bal_text}\n"
+    text += f"📦 <b>Предметы Джеффа:</b> 🗝 Ключ: {k_ch}/5 зар. | ✝️ {cr_cnt} | 💊 {vit_cnt} | 🔦 {fl_cnt}\n━━━━━━━━━━━━━━━━━━\n"
     if not all_items: text += "<i>Пусто. Открывайте крейты!</i>"
     
     for item_str in page_items:
@@ -850,8 +942,21 @@ def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarku
         InlineKeyboardButton(text="🏳 Сдаться", callback_data=f"b_surr_{battle_id}")
     ])
     
-    mode_text = "🔄 В меню Улучшений" if mode == "deploy" else "🔄 В меню Размещения"
-    buttons.append([InlineKeyboardButton(text=mode_text, callback_data=f"b_switch_mode_{battle_id}")])
+    if mode == "deploy":
+        buttons.append([
+            InlineKeyboardButton(text="🔄 В меню Улучшений", callback_data=f"b_mode_upg_{battle_id}"),
+            InlineKeyboardButton(text="🎒 Предметы Джеффа", callback_data=f"b_mode_items_{battle_id}")
+        ])
+    elif mode == "upgrade":
+        buttons.append([
+            InlineKeyboardButton(text="🔄 В меню Размещения", callback_data=f"b_mode_dep_{battle_id}"),
+            InlineKeyboardButton(text="🎒 Предметы Джеффа", callback_data=f"b_mode_items_{battle_id}")
+        ])
+    elif mode == "items":
+        buttons.append([
+            InlineKeyboardButton(text="🔄 В меню Размещения", callback_data=f"b_mode_dep_{battle_id}"),
+            InlineKeyboardButton(text="🔄 В меню Улучшений", callback_data=f"b_mode_upg_{battle_id}")
+        ])
     
     if mode == "deploy":
         pool = {}
@@ -902,6 +1007,18 @@ def get_main_battle_kb(battle_id: str, view_user_id: str) -> InlineKeyboardMarku
         
         if not upg_pool:
             buttons.append([InlineKeyboardButton(text="Нет юнитов для улучшения", callback_data="none")])
+
+    elif mode == "items":
+        u_it = user_items.get(str(view_user_id), {})
+        cr_c = u_it.get("crucifix", 0)
+        vt_c = u_it.get("vitamins", 0)
+        fl_c = u_it.get("flashlight", 0)
+        
+        buttons.append([InlineKeyboardButton(text=f"✝️ Сжечь волну (Крест: {cr_c})", callback_data=f"b_use_crucifix_{battle_id}")])
+        buttons.append([
+            InlineKeyboardButton(text=f"💊 Витамины (-50% КД) ({vt_c})", callback_data=f"b_use_vitamins_{battle_id}"),
+            InlineKeyboardButton(text=f"🔦 Фонарик (Камуфляж) ({fl_c})", callback_data=f"b_use_flashlight_{battle_id}")
+        ])
             
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -939,6 +1056,10 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
         
     if current_slow_pct > 0:
         text += f"❄️ <b>СТАТУС: ЗАМЕДЛЕН НА {current_slow_pct}%!</b>\n"
+    if battle.get("vitamins_turns", 0) > 0:
+        text += f"💊 <b>ВИТАМИНЫ: КД атак -50% (осталось {battle['vitamins_turns']} х.)</b>\n"
+    if battle.get("flashlight_turns", 0) > 0:
+        text += f"🔦 <b>ФОНАРИК: Камуфляж раскрыт (осталось {battle['flashlight_turns']} х.)</b>\n"
         
     living_mobs = len(battle["mobs"])
     for m in battle["mobs"][:5]: 
@@ -1028,6 +1149,8 @@ async def render_battle_ui(battle_id: str, bot: Bot) -> tuple:
             
         if has_upgrades: text += upg_text
         text += "\n<i>* Уровневые скидки применяются автоматически при покупке.</i>\n"
+    elif battle.get("ui_mode") == "items":
+        text += "\n🎒 <b>МЕНЮ РАСХОДНИКОВ:</b>\nНажимайте на кнопки внизу, чтобы использовать Крест, Витамины или Фонарик прямо в бою!\n"
         
     text += "=====================\n"
     if not photo_file or isinstance(photo_file, str):
@@ -1155,7 +1278,8 @@ async def cq_crate_info(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     cid = callback.data.split("_")[2]
     crate = crates_db[cid]
-    unlocked_base = set([item.split(":")[0] for item in user_inventory.get(str(callback.from_user.id), {})])
+    user_id_str = str(callback.from_user.id)
+    unlocked_base = set([item.split(":")[0] for item in user_inventory.get(user_id_str, {})])
     total_weight = sum(crate.get("units", {}).values())
     
     text = f"📦 <b>{crate.get('name', 'Крейт')}</b>\n━━━━━━━━━━━━━━━━━━\n💰 <b>Цена:</b> {crate['price']} {crate.get('currency', '💰 Монеты')}\n\n🎲 <b>Шансы выпадения:</b>\n"
@@ -1167,11 +1291,16 @@ async def cq_crate_info(callback: CallbackQuery, state: FSMContext):
     else:
         text += "<i>В этом крейте нет юнитов!</i>\n"
     
-    prof = user_profiles.get(str(callback.from_user.id), {"level": 1})
+    prof = user_profiles.get(user_id_str, {"level": 1})
     _, shiny_chance, disc, _, _, _ = get_bonuses_data(prof["level"])
     
     text += f"\n✨ <i>Шанс на Шайни: {int(shiny_chance*100)}% (Бонус уровня)</i>\n"
     if disc > 0: text += f"🏷 <i>Скидка {int(disc*100)}% в бою на всех юнитов из-за вашего уровня!</i>\n"
+    
+    key_charges = user_items.get(user_id_str, {}).get("key_charges", 0)
+    if key_charges > 0:
+        text += f"🗝 <i>Скелетный Ключ активен! Скидка 30% на {key_charges} открытий.</i>\n"
+        
     text += "━━━━━━━━━━━━━━━━━━\nСколько крейтов открыть?"
     
     kb = [[InlineKeyboardButton(text="Откр. 1", callback_data=f"crate_open_{cid}_1"), InlineKeyboardButton(text="Откр. 5", callback_data=f"crate_open_{cid}_5")],
@@ -1200,7 +1329,22 @@ async def cq_crate_open(callback: CallbackQuery, state: FSMContext):
     valid_units = {k: v for k, v in crate.get("units", {}).items() if k in units_db}
     if not valid_units: return await callback.answer("Этот крейт пуст или юниты удалены!", show_alert=True)
     
-    total_cost = crate["price"] * amount
+    unit_price = crate["price"]
+    u_it = user_items.get(user_id_str, {})
+    key_charges = u_it.get("key_charges", 0)
+    charges_used = min(amount, key_charges)
+    
+    if charges_used > 0:
+        disc_cost = int(unit_price * 0.70)
+        total_cost = (charges_used * disc_cost) + ((amount - charges_used) * unit_price)
+        u_it["key_charges"] -= charges_used
+        u_it["key_spent"] = u_it.get("key_spent", 0) + charges_used
+        if u_it["key_spent"] >= 5:
+            grant_achievement(user_id_str, "use_key", callback.bot, callback.message.chat.id)
+        user_items[user_id_str] = u_it
+    else:
+        total_cost = unit_price * amount
+        
     req_cur = crate.get("currency", "💰 Монеты")
     bal = user_balances.get(user_id_str, {"💰 Монеты": 100})
     
@@ -1217,8 +1361,10 @@ async def cq_crate_open(callback: CallbackQuery, state: FSMContext):
     prof = user_profiles.get(user_id_str, {"level": 1})
     _, shiny_chance, _, _, _, _ = get_bonuses_data(prof["level"])
     
+    has_shiny = False
     for uid in results:
         is_shiny = 1 if random.random() <= shiny_chance else 0
+        if is_shiny: has_shiny = True
         item_str = f"{uid}:{is_shiny}"
         counts[item_str] = counts.get(item_str, 0) + 1
         user_inventory[user_id_str][item_str] = user_inventory[user_id_str].get(item_str, 0) + 1
@@ -1230,7 +1376,12 @@ async def cq_crate_open(callback: CallbackQuery, state: FSMContext):
             
     save_data()
     
-    text = f"🎉 <b>{callback.from_user.first_name}</b>, вы открыли <b>{crate.get('name')}</b> ({amount} шт.)!\n━━━━━━━━━━━━━━━━━━\n<b>Вам выпало:</b>\n"
+    grant_achievement(user_id_str, "first_crate", callback.bot, callback.message.chat.id)
+    if has_shiny:
+        grant_achievement(user_id_str, "drop_shiny", callback.bot, callback.message.chat.id)
+    
+    disc_note = f"\n🗝 <i>Использовано зарядов Скелетного ключа: {charges_used} (Скидка 30%!)</i>" if charges_used > 0 else ""
+    text = f"🎉 <b>{callback.from_user.first_name}</b>, вы открыли <b>{crate.get('name')}</b> ({amount} шт.)!{disc_note}\n━━━━━━━━━━━━━━━━━━\n<b>Вам выпало:</b>\n"
     for item_str, cnt in counts.items():
         uid, is_shiny_str = item_str.split(":")
         if uid in units_db: 
@@ -1484,6 +1635,13 @@ async def process_battle_turn(battle_id: str, bot: Bot):
     best_cd_mult, best_dmg_mult = 1.0, 1.0
     delay = bot_settings["turn_time_skip"] if battle["auto_skip"] else bot_settings["turn_time_noskip"]
     
+    # Эффект Витаминов (-50% к КД)
+    vitamins_active = battle.get("vitamins_turns", 0) > 0
+    if vitamins_active:
+        best_cd_mult *= 0.5
+        
+    flashlight_active = battle.get("flashlight_turns", 0) > 0
+    
     for uid, p in battle["players"].items():
         for dep in p["deployed"]:
             u_stats = get_battle_stats(dep["uid"], dep.get("is_shiny", False), dep.get("level", 1))
@@ -1501,6 +1659,7 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                     dep["slow_timer"] -= slow_cd
                     battle["slow_effects"].append({"percent": float(u_stats.get("slow_percent", 20.0)), "turns_left": int(u_stats.get("slow_duration", 5.0))})
 
+    chat_id = battle["chat_id"]
     for m in battle["mobs"]:
         if m.get("burn_duration", 0) > 0:
             bdmg = m.get("burn_damage", 0)
@@ -1519,6 +1678,9 @@ async def process_battle_turn(battle_id: str, bot: Bot):
     battle["mobs"] = [m for m in battle["mobs"] if m["hp"] > 0]
 
     for p_uid, p in battle["players"].items():
+        if p["coins"] >= 5000:
+            grant_achievement(p_uid, "banker", bot, chat_id)
+            
         for dep in p["deployed"]:
             u_stats = get_battle_stats(dep["uid"], dep.get("is_shiny", False), dep.get("level", 1))
             if not u_stats: continue 
@@ -1537,7 +1699,7 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                 dep["time_bank"] -= actual_cd
                 coins_earned = 0.0
 
-                valid_mobs = [m for m in battle["mobs"] if can_hit(target_t, m.get("trait", "Обычный"))]
+                valid_mobs = [m for m in battle["mobs"] if can_hit(target_t, m.get("trait", "Обычный"), flashlight_active)]
                 if not valid_mobs: continue 
                 
                 def apply_status_effects(target_mob):
@@ -1549,6 +1711,28 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                             target_mob["burn_duration"] = u_stats.get("burn_duration", 3)
                             target_mob["burn_damage"] = u_stats.get("burn_damage", 5)
 
+                def check_kill_achievements(mob_obj):
+                    mid_str = str(mob_obj.get("id"))
+                    map_name = m_data.get("name", "")
+                    if mid_str == "4" and "Hotel1" in map_name:
+                        grant_achievement(p_uid, "kill_rush", bot, chat_id)
+                    if mid_str == "8":
+                        grant_achievement(p_uid, "kill_eyes", bot, chat_id)
+                    if mid_str == "11":
+                        grant_achievement(p_uid, "kill_halt", bot, chat_id)
+                    if mid_str == "7":
+                        grant_achievement(p_uid, "kill_shadow", bot, chat_id)
+                    if mid_str == "2" and battle["current_wave"] == 1:
+                        grant_achievement(p_uid, "kill_timothy", bot, chat_id)
+                    if mid_str == "16" and target_t == "Анти-Воздух":
+                        grant_achievement(p_uid, "kill_void", bot, chat_id)
+                    if mid_str == "14":
+                        grant_achievement(p_uid, "kill_glitch", bot, chat_id)
+                    if mid_str == "18" and not battle.get("slow_effects"):
+                        grant_achievement(p_uid, "kill_a90", bot, chat_id)
+                    if mob_obj.get("trait") == "Камуфляж" and target_t == "Детектор":
+                        grant_achievement(p_uid, "cam_det", bot, chat_id)
+
                 if any(t in utypes for t in ["Одиночный", "Оглушение", "Горение", "Гений"]): 
                     m = valid_mobs[0]
                     dmg_actual = dmg_base if "Гений" in utypes else round(dmg_base * (1 - m["def"] / 100), 2)
@@ -1556,7 +1740,9 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                     coins_earned += actual_dmg_done * bot_settings["coins_per_damage"]
                     p["damage_dealt"] += actual_dmg_done
                     m["hp"] = round(m["hp"] - dmg_actual, 2)
-                    if m["hp"] <= 0: p["mobs_killed"] += 1
+                    if m["hp"] <= 0: 
+                        p["mobs_killed"] += 1
+                        check_kill_achievements(m)
                     apply_status_effects(m)
                     
                 if "Сплеш" in utypes:
@@ -1567,7 +1753,9 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                         coins_earned += actual_dmg_done * bot_settings["coins_per_damage"]
                         p["damage_dealt"] += actual_dmg_done
                         m["hp"] = round(m["hp"] - dmg_actual, 2)
-                        if m["hp"] <= 0: p["mobs_killed"] += 1
+                        if m["hp"] <= 0: 
+                            p["mobs_killed"] += 1
+                            check_kill_achievements(m)
                         apply_status_effects(m)
                     
                 if "АОЕ" in utypes:
@@ -1578,19 +1766,23 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                         coins_earned += actual_dmg_done * bot_settings["coins_per_damage"]
                         p["damage_dealt"] += actual_dmg_done
                         m["hp"] = round(m["hp"] - dmg_actual, 2)
-                        if m["hp"] <= 0: p["mobs_killed"] += 1
+                        if m["hp"] <= 0: 
+                            p["mobs_killed"] += 1
+                            check_kill_achievements(m)
                         apply_status_effects(m)
                         
                 battle["mobs"] = [m for m in battle["mobs"] if m["hp"] > 0]
                 p["coins"] += coins_earned
                 p["coins_earned"] += coins_earned
 
-    chat_id = battle["chat_id"]
     new_slows = []
     for se in battle.get("slow_effects", []):
         se["turns_left"] -= 1
         if se["turns_left"] > 0: new_slows.append(se)
     battle["slow_effects"] = new_slows
+    
+    if battle.get("vitamins_turns", 0) > 0: battle["vitamins_turns"] -= 1
+    if battle.get("flashlight_turns", 0) > 0: battle["flashlight_turns"] -= 1
     
     for m in battle["mobs"]:
         if m.get("stun_duration", 0) > 0: m["stun_duration"] -= 1
@@ -1656,7 +1848,8 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
     
     mvp_id = max(battle["players"], key=lambda k: battle["players"][k]["damage_dealt"], default=None)
     
-    base_exp = 100 if is_win else battle["current_wave"] * 2
+    # Облегченное, сбалансированное получение опыта
+    base_exp = (160 + battle["current_wave"] * 12) if is_win else (battle["current_wave"] * 8)
     base_coins = m_data.get("win_coins", 100) if is_win else m_data.get("lose_coins", 10)
     rew_cur = m_data.get("reward_currency", "💰 Монеты")
     
@@ -1680,6 +1873,27 @@ async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
         text += f"• <b>{p['name']}</b>{mvp_tag}\n"
         text += f"   └ +{coins_earned} {rew_cur} (Множитель x{mult:.1f})\n"
         text += f"   └ 💠 +{exp_earned} EXP{lvl_tag}\n\n"
+        
+        # Достижения за финал матча
+        grant_achievement(p_uid, "welcome", bot, chat_id)
+        if len(battle["players"]) > 1 and is_win:
+            grant_achievement(p_uid, "buddy", bot, chat_id)
+        if is_win and battle["base_hp"] >= (100 + prof["level"] - 1):
+            grant_achievement(p_uid, "flawless_win", bot, chat_id)
+        if is_win and battle["base_hp"] < 10:
+            grant_achievement(p_uid, "low_hp_win", bot, chat_id)
+            
+        m_name = m_data.get("name", "")
+        if is_win and "Seek Run" in m_name:
+            grant_achievement(p_uid, "win_seek", bot, chat_id)
+        if is_win and "Library" in m_name:
+            grant_achievement(p_uid, "win_figure", bot, chat_id)
+        if is_win and "Hotel1" in m_name:
+            grant_achievement(p_uid, "win_hotel1", bot, chat_id)
+        if is_win and "EASY" in m_name:
+            grant_achievement(p_uid, "win_rooms_easy", bot, chat_id)
+        if is_win and "HARD" in m_name:
+            grant_achievement(p_uid, "win_rooms_hard", bot, chat_id)
             
     text += "📊 <b>СТАТИСТИКА МАТЧА:</b>\n"
     players = list(battle["players"].values())
@@ -1806,6 +2020,214 @@ async def battle_surrender(callback: CallbackQuery):
     if callback.from_user.id != battle["host_id"]: return await callback.answer("Только хост может сдаться!", show_alert=True)
     await finish_battle(battle_id, callback.bot, False)
     await callback.answer("Вы сдались!")
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("b_mode_"))
+async def battle_set_mode(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    mode, battle_id = parts[2], parts[3]
+    if battle_id not in active_battles: return await callback.answer("Бой окончен!", show_alert=True)
+    active_battles[battle_id]["ui_mode"] = mode
+    await update_main_battle_message(battle_id, callback.bot)
+    await callback.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("b_use_crucifix_"))
+async def battle_use_crucifix(callback: CallbackQuery):
+    battle_id = callback.data.split("_")[3]
+    user_id_str = str(callback.from_user.id)
+    if battle_id not in active_battles: return await callback.answer("Бой окончен!", show_alert=True)
+    battle = active_battles[battle_id]
+    if user_id_str not in battle["players"]: return await callback.answer("Вы не в этом бою!", show_alert=True)
+    
+    u_it = user_items.get(user_id_str, {})
+    if u_it.get("crucifix", 0) <= 0:
+        return await callback.answer("❌ У вас нет Креста! Купите его в Лавке Джеффа.", show_alert=True)
+        
+    u_it["crucifix"] -= 1
+    user_items[user_id_str] = u_it
+    battle["mobs"] = []
+    save_data()
+    
+    grant_achievement(user_id_str, "use_crucifix", callback.bot, battle["chat_id"])
+    await callback.bot.send_message(chat_id=battle["chat_id"], text=f"✝️ <b>{callback.from_user.first_name} АКТИВИРОВАЛ КРЕСТ!</b>\nСвященные цепи полностью уничтожили текущую волну мобов!")
+    await update_main_battle_message(battle_id, callback.bot)
+    await callback.answer("Крест активирован!")
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("b_use_vitamins_"))
+async def battle_use_vitamins(callback: CallbackQuery):
+    battle_id = callback.data.split("_")[3]
+    user_id_str = str(callback.from_user.id)
+    if battle_id not in active_battles: return await callback.answer("Бой окончен!", show_alert=True)
+    battle = active_battles[battle_id]
+    if user_id_str not in battle["players"]: return await callback.answer("Вы не в этом бою!", show_alert=True)
+    
+    u_it = user_items.get(user_id_str, {})
+    if u_it.get("vitamins", 0) <= 0:
+        return await callback.answer("❌ У вас нет Витаминов! Купите их в Лавке Джеффа.", show_alert=True)
+        
+    u_it["vitamins"] -= 1
+    user_items[user_id_str] = u_it
+    battle["vitamins_turns"] = 2
+    save_data()
+    
+    await callback.bot.send_message(chat_id=battle["chat_id"], text=f"💊 <b>{callback.from_user.first_name} ПРИНЯЛ ВИТАМИНЫ!</b>\nКД атаки всех союзных юнитов снижен на 50% на 2 хода!")
+    await update_main_battle_message(battle_id, callback.bot)
+    await callback.answer("Витамины активированы!")
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("b_use_flashlight_"))
+async def battle_use_flashlight(callback: CallbackQuery):
+    battle_id = callback.data.split("_")[3]
+    user_id_str = str(callback.from_user.id)
+    if battle_id not in active_battles: return await callback.answer("Бой окончен!", show_alert=True)
+    battle = active_battles[battle_id]
+    if user_id_str not in battle["players"]: return await callback.answer("Вы не в этом бою!", show_alert=True)
+    
+    u_it = user_items.get(user_id_str, {})
+    if u_it.get("flashlight", 0) <= 0:
+        return await callback.answer("❌ У вас нет Фонарика! Купите его в Лавке Джеффа.", show_alert=True)
+        
+    u_it["flashlight"] -= 1
+    user_items[user_id_str] = u_it
+    battle["flashlight_turns"] = 3
+    save_data()
+    
+    await callback.bot.send_message(chat_id=battle["chat_id"], text=f"🔦 <b>{callback.from_user.first_name} ВКЛЮЧИЛ ФОНАРИК!</b>\nВсе замаскированные мобы раскрыты на 3 хода!")
+    await update_main_battle_message(battle_id, callback.bot)
+    await callback.answer("Фонарик включен!")
+
+# ==========================================
+# ОБРАБОТЧИКИ ЛАВКИ ДЖЕФФА И ДОСТИЖЕНИЙ
+# ==========================================
+@dp.callback_query(StateFilter('*'), F.data == "jeff_closed")
+async def cq_jeff_closed(cb: CallbackQuery):
+    text = (
+        "🚪 <b>Лавка Джеффа сейчас закрыта!</b>\n\n"
+        "Джефф приходит в отель по расписанию (МСК):\n"
+        "• <b>07:00</b>\n"
+        "• <b>13:00</b>\n"
+        "• <b>17:00</b>\n"
+        "• <b>20:00</b>\n"
+        "• <b>23:00</b>\n\n"
+        "<i>Каждый визит длится ровно 45 минут.</i>"
+    )
+    await cb.answer(text, show_alert=True)
+
+@dp.callback_query(StateFilter('*'), F.data == "jeff_shop")
+async def cq_jeff_shop(cb: CallbackQuery):
+    is_open, mins_left = get_jeff_status()
+    if not is_open:
+        return await cq_jeff_closed(cb)
+        
+    uid = str(cb.from_user.id)
+    init_user_balance(uid)
+    bal = user_balances.get(uid, {"💰 Монеты": 100})
+    u_it = user_items.get(uid, {})
+    
+    text = (
+        f"🛎 <b>ЛАВКА ДЖЕФФА (JEFF'S SHOP)</b> 🛎\n"
+        f"<i>«Добро пожаловать в комнату 52! Выбирай с умом...»</i>\n"
+        f"⏳ <b>Джефф уйдёт через: {mins_left} мин.</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🗝 <b>Скелетный Ключ (5 зарядов)</b>\n"
+        "└ <i>Дает скидку 30% на следующие 5 открытий крейтов!</i>\n"
+        "└ Цена: <b>600 💰</b> или <b>40 🟡</b>\n\n"
+        "✝️ <b>Крест (Crucifix)</b>\n"
+        "└ <i>Расходник в бою: полностью сжигает текущую волну мобов!</i>\n"
+        "└ Цена: <b>1,500 💰</b> или <b>300 🟡</b>\n\n"
+        "💊 <b>Витамины</b>\n"
+        "└ <i>Расходник в бою: срезает КД атак всех юнитов на 50% на 2 хода!</i>\n"
+        "└ Цена: <b>350 💰</b> или <b>20 🟡</b>\n\n"
+        "🔦 <b>Фонарик</b>\n"
+        "└ <i>Расходник в бою: раскрывает всех Камуфляж-мобов на 3 хода!</i>\n"
+        "└ Цена: <b>250 💰</b> или <b>15 🟡</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>Ваш баланс:</b> 💰 {bal.get('💰 Монеты', 0)} | 🟡 {bal.get('🟡Кнобсы', 0)}\n"
+        f"🎒 <b>Инвентарь:</b> 🗝 {u_it.get('key_charges', 0)}/5 зар. | ✝️ {u_it.get('crucifix', 0)} | 💊 {u_it.get('vitamins', 0)} | 🔦 {u_it.get('flashlight', 0)}"
+    )
+    
+    kb = [
+        [InlineKeyboardButton(text="🗝 Ключ (600💰)", callback_data="buy_item_key_coins"), InlineKeyboardButton(text="🗝 Ключ (40🟡)", callback_data="buy_item_key_knobs")],
+        [InlineKeyboardButton(text="✝️ Крест (1500💰)", callback_data="buy_item_crucifix_coins"), InlineKeyboardButton(text="✝️ Крест (300🟡)", callback_data="buy_item_crucifix_knobs")],
+        [InlineKeyboardButton(text="💊 Витамины (350💰)", callback_data="buy_item_vitamins_coins"), InlineKeyboardButton(text="💊 Витамины (20🟡)", callback_data="buy_item_vitamins_knobs")],
+        [InlineKeyboardButton(text="🔦 Фонарик (250💰)", callback_data="buy_item_flashlight_coins"), InlineKeyboardButton(text="🔦 Фонарик (15🟡)", callback_data="buy_item_flashlight_knobs")],
+        [InlineKeyboardButton(text="🔙 В главное меню", callback_data="back_to_main_menu")]
+    ]
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("buy_item_"))
+async def cq_buy_item(cb: CallbackQuery):
+    is_open, _ = get_jeff_status()
+    if not is_open:
+        return await cq_jeff_closed(cb)
+        
+    parts = cb.data.split("_")
+    item_type, cur_type = parts[2], parts[3]
+    uid = str(cb.from_user.id)
+    init_user_balance(uid)
+    bal = user_balances.get(uid, {"💰 Монеты": 100})
+    
+    cur_name = "💰 Монеты" if cur_type == "coins" else "🟡Кнобсы"
+    prices = {
+        "key": {"coins": 600, "knobs": 40},
+        "crucifix": {"coins": 1500, "knobs": 300},
+        "vitamins": {"coins": 350, "knobs": 20},
+        "flashlight": {"coins": 250, "knobs": 15}
+    }
+    
+    cost = prices[item_type][cur_type]
+    if bal.get(cur_name, 0) < cost:
+        return await cb.answer(f"Недостаточно средств! Требуется {cost} {cur_name}.", show_alert=True)
+        
+    bal[cur_name] -= cost
+    if uid not in user_items:
+        user_items[uid] = {"crucifix": 0, "vitamins": 0, "flashlight": 0, "key_charges": 0, "key_spent": 0}
+        
+    if item_type == "key":
+        user_items[uid]["key_charges"] = user_items[uid].get("key_charges", 0) + 5
+    elif item_type == "crucifix":
+        user_items[uid]["crucifix"] = user_items[uid].get("crucifix", 0) + 1
+    elif item_type == "vitamins":
+        user_items[uid]["vitamins"] = user_items[uid].get("vitamins", 0) + 1
+    elif item_type == "flashlight":
+        user_items[uid]["flashlight"] = user_items[uid].get("flashlight", 0) + 1
+        
+    save_data()
+    await cb.answer("✅ Товар успешно куплен!")
+    await cq_jeff_shop(cb)
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("ach_p_"))
+async def cq_achievements_page(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    page = int(callback.data.split("_")[2])
+    uid = str(callback.from_user.id)
+    unlocked = user_achievements.get(uid, [])
+
+    all_ids = list(ACHIEVEMENTS_DB.keys())
+    per_page = 6
+    total_pages = max(1, (len(all_ids) + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    
+    current_batch = all_ids[(page-1)*per_page : page*per_page]
+
+    text = f"🏆 <b>ДОСТИЖЕНИЯ ({len(unlocked)} / {len(all_ids)})</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+    for aid in current_batch:
+        ach = ACHIEVEMENTS_DB[aid]
+        if aid in unlocked:
+            text += f"✅ <b>{ach['name']}</b>\n└ <i>{ach['desc']}</i>\n└ Статус: <b>Получено</b>\n\n"
+        else:
+            rew = f"+{ach['c']} 💰"
+            if ach['k'] > 0: rew += f" | +{ach['k']} 🟡"
+            text += f"🔒 <b>{ach['name']}</b>\n└ <i>{ach['desc']}</i>\n└ 🎁 Награда: {rew} | +{ach['exp']} EXP\n\n"
+
+    kb = []
+    nav = []
+    if page > 1: nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"ach_p_{page-1}"))
+    if page < total_pages: nav.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"ach_p_{page+1}"))
+    if nav: kb.append(nav)
+    kb.append([InlineKeyboardButton(text="🔙 В главное меню", callback_data="back_to_main_menu")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.answer()
 
 # ==========================================
 # АДМИН ПАНЕЛЬ И РЕДАКТОРЫ
