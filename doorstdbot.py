@@ -1,9 +1,11 @@
-"""Backward-compatible launcher for the rewritten TD multi-bot platform."""
+from __future__ import annotations
+
+"""Compatibility entry point containing the full TD/BaaS application assembly."""
+
+import asyncio
 
 from main import main
 
 
 if __name__ == "__main__":
-    import asyncio
-
     asyncio.run(main())
